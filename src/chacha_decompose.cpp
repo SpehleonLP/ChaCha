@@ -30,16 +30,18 @@ SwingTwist decompose_swing_twist(const glm::quat& q, const glm::vec3& twist_axis
 
 glm::vec2 swing_to_angles(const glm::quat& swing)
 {
-    float x_angle_rad = 2.0f * std::atan2(swing.x, swing.w);
-    float z_angle_rad = 2.0f * std::atan2(swing.z, swing.w);
+    glm::quat s = (swing.w < 0.0f) ? -swing : swing;
+    float x_angle_rad = 2.0f * std::atan2(s.x, s.w);
+    float z_angle_rad = 2.0f * std::atan2(s.z, s.w);
     return {x_angle_rad, z_angle_rad};
 }
 
 float twist_to_angle(const glm::quat& twist, const glm::vec3& twist_axis)
 {
-    glm::vec3 t_vec(twist.x, twist.y, twist.z);
+    glm::quat t = (twist.w < 0.0f) ? -twist : twist;
+    glm::vec3 t_vec(t.x, t.y, t.z);
     float sin_half = glm::dot(t_vec, twist_axis);
-    float angle_rad = 2.0f * std::atan2(sin_half, twist.w);
+    float angle_rad = 2.0f * std::atan2(sin_half, t.w);
     return angle_rad;
 }
 

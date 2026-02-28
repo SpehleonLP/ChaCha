@@ -3,7 +3,9 @@
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
+#include <numeric>
 
 namespace ChaCha {
 
@@ -77,6 +79,18 @@ static void extract_rotation_tracks(
         float x_val = swing_angles.x;
         float y_val = twist_angle;
         float z_val = swing_angles.y;
+
+        if (i > 0) {
+            auto unwrap = [](float cur, float prev) -> float {
+                float d = cur - prev;
+                if (d > 3.14159265f) cur -= 6.28318530f;
+                else if (d < -3.14159265f) cur += 6.28318530f;
+                return cur;
+            };
+            x_val = unwrap(x_val, prev_x);
+            y_val = unwrap(y_val, prev_y);
+            z_val = unwrap(z_val, prev_z);
+        }
 
         float x_vel = 0.0f, y_vel = 0.0f, z_vel = 0.0f;
         if (i > 0) {
@@ -197,6 +211,137 @@ std::vector<DofTrack> extract_dof_tracks(
     return tracks;
 }
 
+void optimize_stage_order(
+    std::vector<Stage>& stages,
+    const std::vector<DofTrack>& rotation_tracks,
+    std::span<const AnimationChannel> channels,
+    const Skeleton& skeleton,
+    int node)
+{
+    // Separate rotation stages from non-rotation stages
+    std::vector<size_t> rot_indices;
+    for (size_t i = 0; i < stages.size(); ++i) {
+        auto t = stages[i].type;
+        if (t == StageType::xRotate || t == StageType::yRotate || t == StageType::zRotate) {
+            rot_indices.push_back(i);
+        }
+    }
+
+    if (rot_indices.size() <= 1) return;
+
+    // Build map from StageType to DofTrack samples
+    std::map<StageType, const DofTrack*> track_map;
+    for (const auto& tr : rotation_tracks) {
+        if (tr.node == node) {
+            track_map[tr.type] = &tr;
+        }
+    }
+
+    // Collect rotation channels for this node to recompute ground-truth rel_q
+    std::vector<const AnimationChannel*> rot_channels;
+    for (const auto& ch : channels) {
+        if (ch.node == node && ch.property == Property::Rotation) {
+            rot_channels.push_back(&ch);
+        }
+    }
+    if (rot_channels.empty()) return;
+
+    const glm::quat rest_inv = glm::inverse(skeleton.rest_rotations[node]);
+    const glm::vec3 twist_axis(0.0f, 1.0f, 0.0f);
+
+    // Build permutation indices over rotation stages
+    std::vector<size_t> perm(rot_indices.size());
+    std::iota(perm.begin(), perm.end(), 0);
+
+    float best_error = std::numeric_limits<float>::max();
+    std::vector<size_t> best_perm = perm;
+
+    // Helper: axis rotation from stage type and angle
+    auto axis_rotation = [](StageType type, float angle_rad) -> glm::quat {
+        float half = angle_rad * 0.5f;
+        float s = std::sin(half);
+        float c = std::cos(half);
+        switch (type) {
+        case StageType::xRotate: return glm::quat(c, s, 0.0f, 0.0f);
+        case StageType::yRotate: return glm::quat(c, 0.0f, s, 0.0f);
+        case StageType::zRotate: return glm::quat(c, 0.0f, 0.0f, s);
+        default: return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        }
+    };
+
+    do {
+        float total_error = 0.0f;
+
+        // Evaluate over all rotation channels for this node
+        for (const auto* ch : rot_channels) {
+            int num_keys = static_cast<int>(ch->times.size());
+            int values_per_key = 4;
+            int stride = values_per_key;
+            if (ch->interp == InterpolationType::CubicSpline) {
+                stride = values_per_key * 3;
+            }
+
+            for (int i = 0; i < num_keys; ++i) {
+                float t = ch->times[i];
+                int offset = i * stride;
+                int val_offset = (ch->interp == InterpolationType::CubicSpline)
+                    ? offset + values_per_key : offset;
+
+                glm::quat key_q(
+                    ch->values[val_offset + 3],
+                    ch->values[val_offset + 0],
+                    ch->values[val_offset + 1],
+                    ch->values[val_offset + 2]
+                );
+                glm::quat rel_q = rest_inv * key_q;
+
+                // Decompose to get per-axis angles
+                auto [swing, twist] = decompose_swing_twist(rel_q, twist_axis);
+                glm::vec2 swing_angles = swing_to_angles(swing);
+                float twist_angle = twist_to_angle(twist, twist_axis);
+
+                // Map stage types to their angles
+                std::map<StageType, float> angle_map;
+                angle_map[StageType::xRotate] = swing_angles.x;
+                angle_map[StageType::yRotate] = twist_angle;
+                angle_map[StageType::zRotate] = swing_angles.y;
+
+                // Compose in permutation order
+                glm::quat composed(1.0f, 0.0f, 0.0f, 0.0f);
+                for (size_t pi = 0; pi < perm.size(); ++pi) {
+                    StageType st = stages[rot_indices[perm[pi]]].type;
+                    auto it = angle_map.find(st);
+                    if (it != angle_map.end()) {
+                        composed = composed * axis_rotation(st, it->second);
+                    }
+                }
+
+                // Angular distance
+                float d = std::abs(glm::dot(composed, rel_q));
+                if (d > 1.0f) d = 1.0f;
+                total_error += 2.0f * std::acos(d);
+            }
+        }
+
+        if (total_error < best_error) {
+            best_error = total_error;
+            best_perm = perm;
+        }
+    } while (std::next_permutation(perm.begin(), perm.end()));
+
+    // Reorder rotation stages according to best permutation
+    std::vector<Stage> reordered_rot;
+    reordered_rot.reserve(rot_indices.size());
+    for (size_t pi = 0; pi < best_perm.size(); ++pi) {
+        reordered_rot.push_back(stages[rot_indices[best_perm[pi]]]);
+    }
+
+    // Replace rotation stages in-place
+    for (size_t i = 0; i < rot_indices.size(); ++i) {
+        stages[rot_indices[i]] = reordered_rot[i];
+    }
+}
+
 } // namespace detail
 
 std::vector<Articulation> analyze(
@@ -230,9 +375,22 @@ std::vector<Articulation> analyze(
             std::span<const detail::RawStage>(raw_stages), options);
 
         if (!stages.empty()) {
+            // Collect rotation tracks for this joint
+            std::vector<detail::DofTrack> rot_tracks;
+            for (const auto& tr : joint_tracks) {
+                if (tr.type == StageType::xRotate ||
+                    tr.type == StageType::yRotate ||
+                    tr.type == StageType::zRotate) {
+                    rot_tracks.push_back(tr);
+                }
+            }
+
+            detail::optimize_stage_order(
+                stages, rot_tracks, channels, skeleton, node);
+
             Articulation art;
             art.node = node;
-            art.name = "joint_" + std::to_string(node);
+            // Leave name empty — caller provides names from document context
             art.stages = std::move(stages);
             result.push_back(std::move(art));
         }

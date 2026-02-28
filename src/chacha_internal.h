@@ -46,6 +46,13 @@ std::vector<Stage> filter_stages(
     const Options& options
 );
 
+void optimize_stage_order(
+    std::vector<Stage>& stages,
+    const std::vector<DofTrack>& rotation_tracks,
+    std::span<const AnimationChannel> channels,
+    const Skeleton& skeleton,
+    int node);
+
 struct SwingTwist {
     glm::quat swing;
     glm::quat twist;

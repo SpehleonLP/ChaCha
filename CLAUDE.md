@@ -100,6 +100,14 @@ Animation Channels (per joint)
         Joints with no significant motion get no articulation (locked).
 ```
 
+### Animation Cleaning (Optional)
+
+A separate `clean()` API removes redundant keyframes from animation channels:
+- Redundant keyframe removal (Step, Linear, CubicSpline)
+- Optional interpolation type promotion (Step→Linear, Linear→CubicSpline) when `frame_time` is set
+
+See `include/chacha_clean.h` for the `CleanOptions` and `CleanedChannel` types.
+
 ### What ChaCha Does NOT Do
 
 - **No file I/O.** It doesn't read glTF files, JSON, or binary formats. The caller extracts animation channels and passes them in.
@@ -189,11 +197,13 @@ chacha/
 ├── include/
 │   ├── chacha.h              // Public API: analyze() function
 │   ├── chacha_types.h        // Input/output data structures
-│   └── chacha_stage.h        // StageType enum and Stage struct
+│   ├── chacha_stage.h        // StageType enum and Stage struct
+│   └── chacha_clean.h        // Public API: clean() for keyframe reduction
 └── src/
     ├── chacha_internal.h     // Internal types: DofTrack, RawStage, pipeline decls
     ├── chacha_analyzer.cpp   // Main analysis pipeline (steps 1-7)
     ├── chacha_decompose.cpp  // Swing-twist decomposition (step 4)
     ├── chacha_segment.cpp    // Stage segmentation and merging (steps 3, 5)
-    └── chacha_filter.cpp     // Noise filtering and thresholds (step 6)
+    ├── chacha_filter.cpp     // Noise filtering and thresholds (step 6)
+    └── chacha_clean.cpp      // Redundant keyframe removal and interpolation promotion
 ```

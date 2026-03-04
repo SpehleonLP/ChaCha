@@ -113,7 +113,10 @@ void interpolate_at(const float* a, const float* b, float t, float* out,
 void eval_linear_at(const CleanedChannel& ch, float t, int vpk, float* out)
 {
     int n = static_cast<int>(ch.times.size());
-    if (n == 0) return;
+    if (n == 0) {
+        for (int i = 0; i < vpk; ++i) out[i] = 0.0f;
+        return;
+    }
 
     // Clamp to range
     if (t <= ch.times[0]) {
@@ -135,7 +138,13 @@ void eval_linear_at(const CleanedChannel& ch, float t, int vpk, float* out)
         else hi = mid;
     }
 
-    float seg_t = (t - ch.times[lo]) / (ch.times[hi] - ch.times[lo]);
+    float dt = ch.times[hi] - ch.times[lo];
+    if (dt <= 0.0f) {
+        const float* v = ch.values.data() + lo * vpk;
+        for (int i = 0; i < vpk; ++i) out[i] = v[i];
+        return;
+    }
+    float seg_t = (t - ch.times[lo]) / dt;
     const float* a = ch.values.data() + lo * vpk;
     const float* b = ch.values.data() + hi * vpk;
     interpolate_at(a, b, seg_t, out, vpk, ch.property);
@@ -145,7 +154,10 @@ void eval_linear_at(const CleanedChannel& ch, float t, int vpk, float* out)
 void eval_step_at(const CleanedChannel& ch, float t, int vpk, float* out)
 {
     int n = static_cast<int>(ch.times.size());
-    if (n == 0) return;
+    if (n == 0) {
+        for (int i = 0; i < vpk; ++i) out[i] = 0.0f;
+        return;
+    }
 
     // Find the last keyframe with time <= t
     int idx = 0;
@@ -203,7 +215,6 @@ void compute_tangent(const CleanedChannel& ch, int i, int vpk, float* tangent)
 CleanedChannel clean_step(const AnimationChannel& ch, float tolerance)
 {
     int vpk = values_per_key(ch.property);
-    int s = stride_for(ch.property, ch.interp);
     int n = static_cast<int>(ch.times.size());
 
     CleanedChannel result;
@@ -424,20 +435,21 @@ bool try_promote_step_to_linear(CleanedChannel& ch, float frame_time, float tole
     float t_start = ch.times.front();
     float t_end = ch.times.back();
 
-    // Sample at every frame_time interval
-    for (float t = t_start; t <= t_end; t += frame_time) {
+    // Sample at every frame_time interval, always including t_end
+    for (float t = t_start; t <= t_end + frame_time * 0.5f; t += frame_time) {
+        if (t > t_end) t = t_end;
+
         float step_val[4];
         float linear_val[4];
 
-        // What step interpolation produces
         eval_step_at(ch, t, vpk, step_val);
-
-        // What linear interpolation would produce
         eval_linear_at(ch, t, vpk, linear_val);
 
         if (!is_close(step_val, linear_val, vpk, ch.property, tolerance)) {
             return false;
         }
+
+        if (t >= t_end) break;
     }
 
     ch.interp = InterpolationType::Linear;
@@ -528,9 +540,6 @@ bool try_promote_linear_to_cubic(CleanedChannel& ch, float frame_time, float tol
         }
 
         if (best_end > anchor) {
-            if (best_end != anchor + 1 || cubic_keys.back().time != ch.times[anchor]) {
-                // Only add if not already added
-            }
             cubic_keys.push_back(make_cubic_key(best_end));
             anchor = best_end;
         } else {
@@ -580,7 +589,6 @@ std::vector<CleanedChannel> clean(
             out.interp = ch.interp;
             out.times.assign(ch.times.begin(), ch.times.end());
 
-            int vpk = values_per_key(ch.property);
             int s = stride_for(ch.property, ch.interp);
             out.values.assign(ch.values.begin(), ch.values.begin() + n * s);
             result.push_back(std::move(out));

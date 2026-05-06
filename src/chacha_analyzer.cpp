@@ -401,6 +401,8 @@ std::vector<Articulation> analyze(
             return a.node < b.node;
         });
 
+    detail::infer_pointing_vectors(result, skeleton);
+
     return result;
 }
 

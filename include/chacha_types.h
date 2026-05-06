@@ -41,6 +41,7 @@ struct Articulation {
     int node{-1};
     std::string name;
     std::vector<Stage> stages;
+    glm::vec3 pointing_vector{0.0f, 1.0f, 0.0f};
 };
 
 struct Options {

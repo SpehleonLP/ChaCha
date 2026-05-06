@@ -58,6 +58,10 @@ struct SwingTwist {
     glm::quat twist;
 };
 
+void infer_pointing_vectors(
+    std::vector<Articulation>& articulations,
+    const Skeleton& skeleton);
+
 SwingTwist decompose_swing_twist(const glm::quat& q, const glm::vec3& twist_axis);
 glm::vec2 swing_to_angles(const glm::quat& swing);
 float twist_to_angle(const glm::quat& twist, const glm::vec3& twist_axis);

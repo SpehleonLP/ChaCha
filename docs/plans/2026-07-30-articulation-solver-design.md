@@ -91,16 +91,43 @@ rest-relative quaternion trajectories (per animation)
   │
   ├─ 1. Candidate enumeration:  12 three-stage charts, plus reduced 1- and 2-stage sets
   │
-  ├─ 2. For each candidate, per animation:
+  ├─ 2. For EVERY candidate × EVERY scanned animation:
   │        exact solve       → finite branch set per frame
-  │        Viterbi DP        → continuous angle trajectory + conditioning number
+  │        Viterbi DP        → continuous angle trajectory
+  │        anchor            → canonicalise the free 2pi offset per axis
+  │        summarise         → discard trajectory, keep fixed-size CandidateSummary
   │
-  ├─ 3. Score candidate:  (dof_count, Σ range, conditioning)  lexicographic
+  ├─ 3. Per candidate: union summaries across animations
   │
-  ├─ 4. Accept best; union ranges across animations; measure velocity and acceleration
+  ├─ 4. Score the unioned candidates:  (dof_count, sum of range, conditioning)
+  │        lexicographic; accept the best
   │
   └─ 5. Emit Articulation
 ```
+
+**The chart is chosen once per joint, over the unioned result — never per animation.**
+The score depends on total range, and range only exists after the union, so every candidate
+must be solved against every scanned animation before anything is scored. Allowing
+different animations to select different charts would be incoherent: the resulting angles
+would not be commensurable and could not be unioned at all.
+
+This costs no additional compute — the full candidate × animation cross product was always
+required — provided solved trajectories are not retained. Per `(candidate, animation)` the
+pipeline keeps only:
+
+```cpp
+struct CandidateSummary {
+    float min_value[3], max_value[3];   // per stage axis, after anchoring
+    float max_velocity[3];
+    float max_acceleration[3];
+    float max_residual_rad;             // reduced-DOF acceptance test
+    float worst_conditioning;           // min over frames
+};
+```
+
+Roughly ten floats. Retaining full trajectories instead would cost about 100 MB on the
+sophia corpus; summaries cost a few hundred kilobytes. The DP needs its trajectory only
+transiently and releases it once the summary is extracted.
 
 File layout:
 
@@ -170,6 +197,31 @@ intervals; this was considered and rejected as disproportionate.
 **Animations are solved independently.** Continuity holds only within an animation;
 ranges union across them afterwards. The sophia test model has 88 animations, so flattening
 would manufacture 87 artificial discontinuities per joint.
+
+### Cross-animation anchoring
+
+Solving animations independently leaves a free parameter that must be pinned before the
+union, or the union is wrong.
+
+The Viterbi pass determines a trajectory only up to its choice of starting branch and a
+global multiple of 2π per axis — every such variant has identical transition costs, so the
+DP is indifferent between them. Two animations of the same joint can therefore settle in
+offsets differing by 2π, describing the same physical pose as `+190°` in one and `−170°` in
+the other. Unioning those yields a 360° range for a joint that moved 20°. This is the
+cross-animation unwrapping defect identified in review, and per-animation DP reintroduces
+it unless anchoring is explicit.
+
+Anchoring rule: after the DP, shift each animation's solved trajectory, per axis, by the
+multiple of 2π that places the trajectory's **midpoint** — `(min + max) / 2` — into
+`(−π, π]`. The rest pose is the origin at 0, and a physical joint does not sit more than
+half a turn from rest, so this anchor is well founded. It is O(1) per axis per animation.
+
+The midpoint is used rather than the first sample because an animation may begin at an
+extreme of its range; anchoring on the midpoint keeps the whole excursion centred on rest
+rather than pushing one tail across the wrap boundary.
+
+Anchoring happens before summarisation, so `CandidateSummary` bounds are already in the
+common frame and the union is a plain per-axis min/max.
 
 ### Reduced-DOF candidates
 
@@ -390,6 +442,14 @@ A new GTest target in ChaCha, matching the tonton-example house style
   Currently reports `0°..60°`.
 - **DP continuity.** A trajectory crossing ±180° unwraps monotonically; an aliased
   rotation resolves to its minimal reading.
+- **Cross-animation anchoring.** Two animations of one joint straddling ±180° from
+  opposite sides must union to the true narrow range, not to ~360°. This is the specific
+  defect the anchoring rule exists to prevent, and it cannot be caught by any
+  single-animation test.
+- **Global chart selection.** A joint whose animations individually favour different
+  charts must still emit a single chart, with ranges expressed in it. Guards against a
+  regression to per-animation chart choice, which would silently produce incommensurable
+  angles.
 - **DOF search.** Synthetic 1-, 2-, and 3-DOF joints yield exactly 1, 2, and 3 stages with
   residual within tolerance.
 - **Name sanitisation.** Spaces collapse, collisions get suffixes, output matches

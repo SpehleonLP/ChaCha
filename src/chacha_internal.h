@@ -105,7 +105,10 @@ struct Trajectory {
     float worst_conditioning{1.0f};
 };
 
-// Signed difference (current - previous) wrapped into (-pi, pi].
+// Signed difference (current - previous) wrapped into [-pi, pi]. At exactly
+// d == pi (mod 2pi) this returns -pi rather than +pi, an artifact of round()
+// rounding halves away from zero; the two are equivalent modulo 2pi and this
+// is harmless here since callers only ever use the value squared.
 float principal_difference(float current, float previous);
 
 // Resolves, per frame, which of solve_euler's two branches minimizes the

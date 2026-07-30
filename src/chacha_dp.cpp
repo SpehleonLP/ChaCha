@@ -59,7 +59,13 @@ Trajectory resolve_branches(
     // avoids any risk of a finite accumulated cost coincidentally aliasing
     // the sentinel value (or the sentinel silently becoming a huge-but-finite
     // number once a step cost is added to it, which would defeat an
-    // exact-equality guard).
+    // exact-equality guard). In this two-branch lattice both nodes at t==0
+    // are reachable and every node has both predecessor branches available,
+    // so every subsequent node is provably reachable too: `reachable` can
+    // never actually be false past t==0, and the `!found`/`!reachable[...]`
+    // fallback paths below are dead code by construction, kept only as a
+    // structural safety net (not live logic) in case that invariant is ever
+    // broken by a future change to this function.
     std::vector<float>   cost(static_cast<size_t>(n) * 2, 0.0f);
     std::vector<uint8_t> back(static_cast<size_t>(n) * 2, 0);
     std::vector<bool>    reachable(static_cast<size_t>(n) * 2, false);

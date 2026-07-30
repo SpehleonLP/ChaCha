@@ -94,6 +94,29 @@ EulerSolution alternate_branch(const EulerSolution& s, const Chart& c);
 // 1.0 is perfectly conditioned, 0.0 is exactly singular (gimbal lock).
 float chart_conditioning(const EulerSolution& s, const Chart& c);
 
+// A continuous, unwrapped angle trajectory for one chart across a sequence
+// of frames. `angle[a]` is not wrapped to (-pi, pi]; it accumulates
+// principal differences so that e.g. a joint that keeps rotating the same
+// direction keeps growing rather than snapping back into the principal
+// branch.
+struct Trajectory {
+    std::vector<float> time;
+    std::vector<float> angle[3];   // continuous, unwrapped, in chart stage order
+    float worst_conditioning{1.0f};
+};
+
+// Signed difference (current - previous) wrapped into (-pi, pi].
+float principal_difference(float current, float previous);
+
+// Resolves, per frame, which of solve_euler's two branches minimizes the
+// total squared step across all three axes from the previous frame (a
+// Viterbi/DP shortest path over the two-branch lattice), then unwraps the
+// chosen branch's angles into a continuous trajectory.
+Trajectory resolve_branches(
+    std::span<const glm::quat> rel_rotations,
+    std::span<const float>     times,
+    const Chart&               chart);
+
 } // namespace detail
 } // namespace ChaCha
 

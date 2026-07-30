@@ -1,0 +1,127 @@
+#include "chacha_internal.h"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace ChaCha {
+namespace detail {
+
+namespace {
+constexpr float kPi    = 3.14159265358979323846f;
+constexpr float kTwoPi = 2.0f * kPi;
+} // namespace
+
+float principal_difference(float current, float previous)
+{
+    float d = current - previous;
+    return d - kTwoPi * std::round(d / kTwoPi);
+}
+
+Trajectory resolve_branches(
+    std::span<const glm::quat> rel,
+    std::span<const float>     times,
+    const Chart&               chart)
+{
+    Trajectory out;
+
+    // Defined policy for mismatched lengths: process only as many frames
+    // as both spans actually provide. `rel` and `times` are expected to be
+    // parallel arrays produced by the same caller; silently truncating to
+    // the shorter one avoids reading past the end of either span while
+    // still producing a usable (if partial) trajectory rather than
+    // crashing or fabricating timestamps.
+    const int n = static_cast<int>(std::min(rel.size(), times.size()));
+    if (n == 0) return out;
+
+    // Two candidate solutions per frame.
+    std::vector<EulerSolution> cand(static_cast<size_t>(n) * 2);
+    std::vector<float>         cond(static_cast<size_t>(n) * 2);
+    for (int t = 0; t < n; ++t) {
+        EulerSolution a = solve_euler(rel[t], chart);
+        EulerSolution b = alternate_branch(a, chart);
+        cand[t * 2 + 0] = a;  cond[t * 2 + 0] = chart_conditioning(a, chart);
+        cand[t * 2 + 1] = b;  cond[t * 2 + 1] = chart_conditioning(b, chart);
+    }
+
+    if (n == 1) {
+        out.time.assign(times.begin(), times.begin() + 1);
+        // With a single frame there is no history to disambiguate branches;
+        // arbitrarily (but deterministically) take branch 0.
+        for (int a = 0; a < 3; ++a) out.angle[a].assign(1, cand[0].angle[a]);
+        out.worst_conditioning = cond[0];
+        return out;
+    }
+
+    // Viterbi. Cost of a transition is the summed squared principal difference
+    // across the three axes; the 2pi lift is forced, so branch is the only
+    // choice. `reachable` tracks which lattice nodes have a finite cost —
+    // using an explicit flag instead of comparing against a float sentinel
+    // avoids any risk of a finite accumulated cost coincidentally aliasing
+    // the sentinel value (or the sentinel silently becoming a huge-but-finite
+    // number once a step cost is added to it, which would defeat an
+    // exact-equality guard).
+    std::vector<float>   cost(static_cast<size_t>(n) * 2, 0.0f);
+    std::vector<uint8_t> back(static_cast<size_t>(n) * 2, 0);
+    std::vector<bool>    reachable(static_cast<size_t>(n) * 2, false);
+
+    reachable[0] = true;
+    reachable[1] = true;
+    cost[0] = 0.0f;
+    cost[1] = 0.0f;
+
+    for (int t = 1; t < n; ++t) {
+        for (int b = 0; b < 2; ++b) {
+            float best = std::numeric_limits<float>::infinity();
+            uint8_t best_prev = 0;
+            bool found = false;
+            for (int p = 0; p < 2; ++p) {
+                if (!reachable[(t - 1) * 2 + p]) continue;
+                float step = 0.0f;
+                for (int a = 0; a < 3; ++a) {
+                    float d = principal_difference(cand[t * 2 + b].angle[a],
+                                                   cand[(t - 1) * 2 + p].angle[a]);
+                    step += d * d;
+                }
+                float total = cost[(t - 1) * 2 + p] + step;
+                if (!found || total < best) { best = total; best_prev = static_cast<uint8_t>(p); found = true; }
+            }
+            cost[t * 2 + b] = best;
+            back[t * 2 + b] = best_prev;
+            reachable[t * 2 + b] = found;
+        }
+    }
+
+    // Backward pass. Both branches at the last frame are always reachable
+    // (every node at t==0 is reachable, and every subsequent node has at
+    // least one finite-cost predecessor since both predecessor branches are
+    // reachable), so no fallback is needed here.
+    const int last = n - 1;
+    std::vector<uint8_t> chosen(static_cast<size_t>(n), 0);
+    chosen[last] = (reachable[last * 2 + 1] &&
+                    (!reachable[last * 2 + 0] || cost[last * 2 + 1] < cost[last * 2 + 0])) ? 1 : 0;
+    for (int t = last; t > 0; --t)
+        chosen[t - 1] = back[t * 2 + chosen[t]];
+
+    // Reconstruct continuous angles by accumulating principal differences.
+    out.time.assign(times.begin(), times.begin() + n);
+    for (int a = 0; a < 3; ++a) out.angle[a].resize(n);
+
+    for (int a = 0; a < 3; ++a)
+        out.angle[a][0] = cand[0 * 2 + chosen[0]].angle[a];
+
+    for (int t = 1; t < n; ++t)
+        for (int a = 0; a < 3; ++a) {
+            float d = principal_difference(cand[t * 2 + chosen[t]].angle[a],
+                                           cand[(t - 1) * 2 + chosen[t - 1]].angle[a]);
+            out.angle[a][t] = out.angle[a][t - 1] + d;
+        }
+
+    out.worst_conditioning = 1.0f;
+    for (int t = 0; t < n; ++t)
+        out.worst_conditioning = std::min(out.worst_conditioning, cond[t * 2 + chosen[t]]);
+
+    return out;
+}
+
+} // namespace detail
+} // namespace ChaCha

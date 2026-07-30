@@ -28,7 +28,11 @@ struct Stage {
     float max_value{};
     float initial_value{};
     float max_velocity{};
-    float max_effort{};
+    // Was `max_effort`. Effort (force/torque) requires mass and inertia,
+    // which this library has no way to derive from keyframe data alone --
+    // deliberately out of scope. What keyframes *do* let us recover is the
+    // peak acceleration.
+    float max_acceleration{};
 };
 
 const char* stage_type_name(StageType type);

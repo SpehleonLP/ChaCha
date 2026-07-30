@@ -21,6 +21,12 @@ const char* stage_type_name(StageType type)
     case StageType::xScale:     return "xScale";
     case StageType::yScale:     return "yScale";
     case StageType::zScale:     return "zScale";
+    // Invalid is a sentinel for unused Candidate slots (see chacha_internal.h)
+    // and must never appear on a real, emitted Stage. Name it explicitly and
+    // distinctly from "unknown" so that if it ever does leak into output --
+    // a bug -- it is instantly recognisable in a diff or log rather than
+    // reading as a plausible-but-wrong stage name.
+    case StageType::Invalid:    return "invalid";
     }
     return "unknown";
 }
@@ -346,15 +352,23 @@ void optimize_stage_order(
 
 std::vector<Articulation> analyze(
     std::span<const AnimationChannel> channels,
-    const Skeleton& skeleton,
-    const Options& options)
+    std::span<const Animation>        animations,
+    const Skeleton&                   skeleton,
+    const Options&                    options,
+    std::span<const int>              scan,
+    std::vector<Diagnostic>*          diagnostics)
 {
     // TODO(Task 10): rebuild analyze() on top of resolve_branches/anchor_trajectory/
     // summarise instead of the retired segment_and_merge pipeline. Stubbed to keep
-    // the tree building in the interim (Task 6).
+    // the tree building in the interim (Task 9). `diagnostics` may be null; this
+    // stub never writes to it, so nullptr is trivially tolerated for now, but
+    // Task 10's real implementation must still guard every write site.
     (void)channels;
+    (void)animations;
     (void)skeleton;
     (void)options;
+    (void)scan;
+    (void)diagnostics;
     return {};
 }
 

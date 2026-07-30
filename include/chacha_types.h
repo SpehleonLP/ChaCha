@@ -47,6 +47,14 @@ struct AnimationChannel {
     std::span<const float> values;
 };
 
+// CONTRACT: `rest_rotations` and `rest_translations` are indexed directly by
+// node and MUST be sized to at least `parents.size()` -- unlike
+// `rest_scales`, an empty or short span here is not a documented "assume a
+// default" case, it is a malformed Skeleton. `analyze()` validates this at
+// entry and returns an empty result rather than indexing out of bounds.
+// `rest_scales` is the one span that may legitimately be empty (meaning
+// "assume all-ones" for every node); if non-empty it is held to the same
+// `parents.size()` floor as the other two.
 struct Skeleton {
     std::span<const int>       parents;
     std::span<const glm::quat> rest_rotations;
@@ -84,9 +92,13 @@ struct Diagnostic {
     int node{-1};
     int animation{-1};
     enum Kind {
-        NonUnitQuaternion,   // a rotation keyframe was not (near) unit length
-        EmptyChannel,        // a channel had zero keyframes
-        MalformedValues,     // values span size didn't match times/stride
+        NonUnitQuaternion,     // a rotation keyframe was not (near) unit length
+        EmptyChannel,          // a channel had zero keyframes
+        MalformedValues,       // values span size didn't match times/stride
+        UnknownAnimationIndex, // channel.animation didn't index the animations span
+        DegenerateRestScale,   // a scale channel's rest scale was too near zero
+                               // to divide by; raw values were reported instead
+                               // of a ratio for the affected axis
     } kind{EmptyChannel};
 };
 

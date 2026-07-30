@@ -98,6 +98,24 @@ std::vector<Articulation> analyze(
     const int num_nodes = static_cast<int>(skeleton.parents.size());
     if (num_nodes == 0) return {};
 
+    // Rest pose spans are indexed directly by node throughout this function
+    // and in infer_pointing_vectors. Unlike rest_scales (documented as
+    // optionally empty -> assume all-ones), rest_rotations and
+    // rest_translations are a load-bearing contract: a short or empty span
+    // here previously segfaulted (ASAN-confirmed) either in the
+    // rest-relative rotation computation below or deeper inside
+    // infer_pointing_vectors, for callers that supplied no translation
+    // channels at all and so had no other reason to notice a malformed
+    // Skeleton. Reject outright rather than silently substituting a guessed
+    // identity pose per node, which would fabricate constraint data instead
+    // of surfacing the caller's error.
+    if (static_cast<int>(skeleton.rest_rotations.size()) < num_nodes ||
+        static_cast<int>(skeleton.rest_translations.size()) < num_nodes ||
+        (!skeleton.rest_scales.empty() &&
+         static_cast<int>(skeleton.rest_scales.size()) < num_nodes)) {
+        return {};
+    }
+
     const std::vector<int> scanned = resolve_scan(animations, scan, options);
     std::vector<bool> in_scan(animations.size(), false);
     for (int a : scanned)
@@ -121,7 +139,16 @@ std::vector<Articulation> analyze(
 
     for (const auto& ch : channels) {
         if (ch.node < 0 || ch.node >= num_nodes) continue;
-        if (ch.animation < 0 || ch.animation >= static_cast<int>(animations.size())) continue;
+        if (ch.animation < 0 || ch.animation >= static_cast<int>(animations.size())) {
+            // A channel referencing a nonexistent animation index is silently
+            // dropped otherwise -- including EVERY channel when `animations`
+            // is empty, which is exactly the shape a bridge layer's bug
+            // (Tasks 13/14) would take: analyze() would return an empty
+            // result with zero diagnostics, indistinguishable from "no
+            // motion observed".
+            note(ch.node, ch.animation, Diagnostic::UnknownAnimationIndex);
+            continue;
+        }
         if (!in_scan[ch.animation]) continue;
         if (!channel_is_well_formed(ch)) {
             note(ch.node, ch.animation,
@@ -170,6 +197,17 @@ std::vector<Articulation> analyze(
 
         Vec3Acc& acc = is_scale ? scale_by_node[ch.node] : translation_by_node[ch.node];
 
+        // A near-zero rest scale amplifies the ratio arbitrarily: a rest of
+        // 1e-7 with the old 1e-8 guard passed through unflagged and reported
+        // a stage like [1e7, 2e7] -- numerically "correct" for the ratio
+        // definition but useless and silently misleading. kMinRestScale is
+        // large enough to catch that case (and the exact-zero case, which
+        // previously fell back to raw values with no diagnostic at all);
+        // when it trips, report raw (untransformed) values for that axis and
+        // flag it rather than fabricate a huge, meaningless range.
+        constexpr float kMinRestScale = 1e-4f;
+        bool degenerate_rest_scale = false;
+
         std::vector<float> track[3];
         for (int a = 0; a < 3; ++a) track[a].reserve(n);
 
@@ -177,12 +215,21 @@ std::vector<Articulation> analyze(
             const float* v = key_at(ch, i);
             for (int a = 0; a < 3; ++a) {
                 const float rest_a = rest[a];
-                const float value  = is_scale
-                    ? ((std::fabs(rest_a) > 1e-8f) ? v[a] / rest_a : v[a])
-                    : (v[a] - rest_a);
+                float value;
+                if (is_scale) {
+                    if (std::fabs(rest_a) > kMinRestScale) {
+                        value = v[a] / rest_a;
+                    } else {
+                        value = v[a];
+                        degenerate_rest_scale = true;
+                    }
+                } else {
+                    value = v[a] - rest_a;
+                }
                 track[a].push_back(value);
             }
         }
+        if (degenerate_rest_scale) note(ch.node, ch.animation, Diagnostic::DegenerateRestScale);
 
         Trajectory t;
         t.time.assign(ch.times.begin(), ch.times.begin() + n);
@@ -225,6 +272,14 @@ std::vector<Articulation> analyze(
         }
     };
 
+    // Stage emission order across properties is a deliberate, fixed
+    // contract, not an accident of these two calls' position relative to
+    // the rotation loop below: translate, then scale, then rotate, for
+    // every node, regardless of the order the caller's channels arrived in.
+    // AGI_articulations stages are order-significant (each stage applies
+    // after the previous one in sequence), so downstream consumers need
+    // this ordering to be stable across runs and future changes rather than
+    // incidental. See Analyze.StageOrderIsTranslateThenScaleThenRotate.
     push_vec3(translation_by_node, StageType::xTranslate, /*is_scale=*/false);
     push_vec3(scale_by_node,       StageType::xScale,     /*is_scale=*/true);
 

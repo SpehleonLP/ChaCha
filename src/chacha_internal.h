@@ -2,8 +2,10 @@
 #define CHACHA_INTERNAL_H
 
 #include "chacha_types.h"
+#include "chacha_stage.h"
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <span>
 #include <vector>
 
 namespace ChaCha {
@@ -65,6 +67,24 @@ void infer_pointing_vectors(
 SwingTwist decompose_swing_twist(const glm::quat& q, const glm::vec3& twist_axis);
 glm::vec2 swing_to_angles(const glm::quat& swing);
 float twist_to_angle(const glm::quat& twist, const glm::vec3& twist_axis);
+
+// A chart is an ordered triple of rotation axes. `axis` holds 0=X, 1=Y, 2=Z.
+// `proper` is true for proper-Euler charts (axis[0] == axis[2], e.g. ZXZ) and
+// false for Tait-Bryan charts (three distinct axes, e.g. XYZ).
+struct Chart {
+    StageType stage[3];
+    int       axis[3];
+    bool      proper;
+};
+
+struct EulerSolution {
+    float angle[3];
+};
+
+std::span<const Chart> all_charts();
+EulerSolution solve_euler(const glm::quat& q, const Chart& c);
+glm::quat     compose_chart(const Chart& c, const float angle[3]);
+glm::quat     axis_quat(int axis, float angle_rad);
 
 } // namespace detail
 } // namespace ChaCha

@@ -49,3 +49,4 @@ testdata/
 
 # Subagent-driven-development scratch workspace
 .superpowers/
+build

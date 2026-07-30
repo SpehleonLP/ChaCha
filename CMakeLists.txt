@@ -48,7 +48,7 @@ endif()
 set_target_properties(chacha PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
-    PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/chacha.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_types.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_stage.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_clean.h"
+    PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/chacha.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_types.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_stage.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_clean.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_naming.h"
 )
 
 option(CHACHA_BUILD_TESTS "Build ChaCha unit tests" ON)

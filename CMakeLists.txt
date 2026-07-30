@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-file(GLOB_RECURSE CHACHA_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+# Pick up newly added sources without a manual cmake re-run.
+file(GLOB_RECURSE CHACHA_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 file(GLOB_RECURSE CHACHA_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
 
 add_library(chacha STATIC ${CHACHA_SOURCES} ${CHACHA_HEADERS})
@@ -31,3 +32,26 @@ set_target_properties(chacha PROPERTIES
     SOVERSION 1
     PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/chacha.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_types.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_stage.h;${CMAKE_CURRENT_SOURCE_DIR}/include/chacha_clean.h"
 )
+
+option(CHACHA_BUILD_TESTS "Build ChaCha unit tests" ON)
+
+if(CHACHA_BUILD_TESTS)
+    find_package(GTest QUIET)
+    if(GTest_FOUND)
+        enable_testing()
+        file(GLOB CHACHA_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+        add_executable(chacha-tests ${CHACHA_TEST_SOURCES})
+        target_include_directories(chacha-tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+        target_link_libraries(chacha-tests PRIVATE chacha GTest::gtest GTest::gtest_main)
+        if(glm_FOUND)
+            target_link_libraries(chacha-tests PRIVATE glm::glm)
+        endif()
+        include(GoogleTest)
+        gtest_discover_tests(chacha-tests)
+    else()
+        message(STATUS "GTest not found; ChaCha unit tests disabled")
+    endif()
+endif()

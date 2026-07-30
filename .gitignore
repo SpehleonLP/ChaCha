@@ -46,3 +46,6 @@ cmake-build-*/
 
 # Test models (large binaries, not distributed)
 testdata/
+
+# Subagent-driven-development scratch workspace
+.superpowers/

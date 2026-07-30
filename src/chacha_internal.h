@@ -86,6 +86,14 @@ EulerSolution solve_euler(const glm::quat& q, const Chart& c);
 glm::quat     compose_chart(const Chart& c, const float angle[3]);
 glm::quat     axis_quat(int axis, float angle_rad);
 
+// The second Euler-angle solution branch describing the same rotation as
+// `s` under chart `c` (the classic "flip" ambiguity: e.g. shoulder-flexed
+// vs. shoulder-hyperextended-and-rotated-180 read the same net rotation).
+EulerSolution alternate_branch(const EulerSolution& s, const Chart& c);
+
+// 1.0 is perfectly conditioned, 0.0 is exactly singular (gimbal lock).
+float chart_conditioning(const EulerSolution& s, const Chart& c);
+
 } // namespace detail
 } // namespace ChaCha
 

@@ -139,3 +139,64 @@ TEST(Charts, SolveRoundTripsAtSingularConfigurations)
         EXPECT_LT(worst, 1e-4f) << "chart failed round trip at a singular configuration";
     }
 }
+
+TEST(Charts, BothBranchesDescribeTheSameRotation)
+{
+    std::mt19937 rng(99);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    for (const auto& chart : all_charts()) {
+        for (int trial = 0; trial < 200; ++trial) {
+            glm::quat q = glm::normalize(glm::quat(u(rng), u(rng), u(rng), u(rng)));
+            EulerSolution s0 = solve_euler(q, chart);
+            EulerSolution s1 = alternate_branch(s0, chart);
+            EXPECT_LT(angular_distance(compose_chart(chart, s1.angle), q), 1e-4f);
+        }
+    }
+}
+
+TEST(Charts, ConditioningFallsToZeroAtTheSingularity)
+{
+    // Tait-Bryan XYZ is singular when the middle angle reaches +-90 degrees.
+    Chart xyz{};
+    for (const auto& c : all_charts())
+        if (!c.proper && c.axis[0] == 0 && c.axis[1] == 1 && c.axis[2] == 2) xyz = c;
+
+    float safe[3]    = {0.3f, 0.0f,             0.2f};
+    float singular[3]= {0.3f, 3.14159265f*0.5f, 0.2f};
+
+    EXPECT_GT(chart_conditioning(EulerSolution{{safe[0], safe[1], safe[2]}}, xyz), 0.9f);
+    EXPECT_LT(chart_conditioning(EulerSolution{{singular[0], singular[1], singular[2]}}, xyz), 1e-3f);
+}
+
+// alternate_branch must be correct not merely on random draws but exactly
+// AT and NEAR the singular configurations, since resolving branch
+// ambiguity near a singularity is the entire reason the machinery exists.
+// This mirrors SolveRoundTripsAtSingularConfigurations's deterministic
+// t1/t3 grid at the singular middle angle, but exercises alternate_branch
+// instead of solve_euler's own round trip.
+TEST(Charts, AlternateBranchIsCorrectAtSingularConfigurations)
+{
+    const float t1_values[] = {-2.5f, -1.7f, -0.8f, 0.0f, 0.6f, 1.4f, 2.3f, 3.0f};
+    const float t3_values[] = {-2.9f, -1.3f, -0.4f, 0.2f, 1.1f, 1.8f, 2.6f, 3.1f};
+
+    for (const auto& chart : all_charts()) {
+        const std::vector<float> singular_middle = chart.proper
+            ? std::vector<float>{0.0f, kTestPi}
+            : std::vector<float>{kTestPi / 2.0f, -kTestPi / 2.0f};
+
+        float worst = 0.0f;
+        for (float m : singular_middle) {
+            for (float t1 : t1_values) {
+                for (float t3 : t3_values) {
+                    const float angle[3] = {t1, m, t3};
+                    glm::quat q = compose_chart(chart, angle);
+                    EulerSolution s0 = solve_euler(q, chart);
+                    EulerSolution s1 = alternate_branch(s0, chart);
+                    glm::quat r = compose_chart(chart, s1.angle);
+                    worst = std::max(worst, angular_distance(q, r));
+                }
+            }
+        }
+        EXPECT_LT(worst, 1e-4f) << "alternate_branch failed at a singular configuration";
+    }
+}

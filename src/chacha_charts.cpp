@@ -200,5 +200,51 @@ EulerSolution solve_euler(const glm::quat& qin, const Chart& chart)
                            wrap_pi(static_cast<float>(theta3))}};
 }
 
+// The second solution branch for the same rotation.
+//
+// Derivation (quaternion conjugation, not the shift-substitution the brief
+// suggested — see report): compose_chart evaluates R_i(t1) R_j(t2) R_k(t3)
+// for axes (i, j, k) using the angle triple exactly as stored in
+// EulerSolution, whatever internal convention (shifted or not) produced
+// it. So the alternate triple (t1+pi, t2', t3+pi) must satisfy
+//   R_i(pi) R_j(t2') R_k(pi) == R_j(t2)                              (*)
+// Insert R_i(pi)^{-1} R_i(pi) and use that conjugating R_j(theta) by a
+// pi-rotation about a perpendicular axis i negates the angle
+// (R_i(pi) R_j(theta) R_i(pi)^{-1} = R_j(-theta) when i != j):
+//   R_i(pi) R_j(t2') R_k(pi)
+//     = R_j(-t2') * [R_i(pi) R_k(pi)]
+// For Tait-Bryan (i, j, k all distinct), R_i(pi) R_k(pi) is a pure
+// quaternion (0, +-e_j) — a rotation of +-pi about j — and +pi and -pi
+// about the same axis are the same rotation, so R_i(pi) R_k(pi) = R_j(pi)
+// unconditionally (no dependence on chart.eps/permutation sign). That
+// makes (*) become R_j(pi - t2') = R_j(t2), i.e. t2' = pi - t2.
+// For proper Euler (k == i), R_i(pi) R_k(pi) = R_i(2*pi) = identity, so (*)
+// becomes R_j(-t2') = R_j(t2), i.e. t2' = -t2.
+// This matches the brief's two formulas exactly (the internal -pi/2 shift
+// in solve_euler's Tait-Bryan branch turned out not to matter: the
+// derivation only uses the returned angle value, not how solve_euler
+// arrived at it). Verified empirically by
+// Charts.BothBranchesDescribeTheSameRotation (random, all 12 charts) and
+// Charts.AlternateBranchIsCorrectAtSingularConfigurations (deterministic
+// grid at the singular middle angle, all 12 charts).
+EulerSolution alternate_branch(const EulerSolution& s, const Chart& c)
+{
+    const float t2 = c.proper ? -s.angle[1] : (kPi - s.angle[1]);
+    return EulerSolution{{
+        wrap_pi(s.angle[0] + kPi),
+        wrap_pi(t2),
+        wrap_pi(s.angle[2] + kPi),
+    }};
+}
+
+float chart_conditioning(const EulerSolution& s, const Chart& c)
+{
+    // Tait-Bryan degenerates as the (shifted) middle angle approaches
+    // +-pi/2; proper Euler degenerates as its (unshifted) middle angle
+    // approaches 0 or pi.
+    return c.proper ? std::fabs(std::sin(s.angle[1]))
+                    : std::fabs(std::cos(s.angle[1]));
+}
+
 } // namespace detail
 } // namespace ChaCha

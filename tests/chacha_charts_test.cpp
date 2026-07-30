@@ -5,11 +5,20 @@
 
 using namespace ChaCha::detail;
 
+// Angle between two quaternions via the relative-rotation quaternion
+// inverse(a)*b, not via acos(dot(a,b)). The acos form is ill-conditioned
+// near zero angle (its derivative is unbounded at dot=1), so float-level
+// noise from computing a and b along independent paths gets amplified into
+// an apparent error around sqrt(float epsilon) ~ 1e-3 rad regardless of how
+// accurate the underlying values are. atan2(|vec|, |w|) stays well
+// conditioned all the way down to zero.
 static float angular_distance(const glm::quat& a, const glm::quat& b)
 {
-    float d = std::fabs(glm::dot(glm::normalize(a), glm::normalize(b)));
-    if (d > 1.0f) d = 1.0f;
-    return 2.0f * std::acos(d);
+    const glm::quat an = glm::normalize(a);
+    const glm::quat bn = glm::normalize(b);
+    const glm::quat d = glm::inverse(an) * bn;
+    const glm::vec3 v(d.x, d.y, d.z);
+    return 2.0f * std::atan2(glm::length(v), std::fabs(d.w));
 }
 
 TEST(Charts, ThereAreTwelve)

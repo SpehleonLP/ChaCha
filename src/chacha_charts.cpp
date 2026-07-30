@@ -2,7 +2,6 @@
 #include <glm/gtc/quaternion.hpp>
 #include <array>
 #include <cmath>
-#include <limits>
 
 namespace ChaCha {
 namespace detail {
@@ -68,86 +67,6 @@ glm::dquat compose_chart_d(const Chart& c, const double angle[3])
     return axis_quat_d(c.axis[0], angle[0])
          * axis_quat_d(c.axis[1], angle[1])
          * axis_quat_d(c.axis[2], angle[2]);
-}
-
-// The exact angular-distance metric a caller (and this solver's own
-// round-trip test) uses to compare two quaternions: float normalize on
-// both sides, float dot, clamp, float acos. `target` is expected to be the
-// *raw*, not-yet-normalized quaternion a caller holds — normalizing it here
-// (once) is what a comparison against it will also do. Passing an
-// already-normalized quaternion in would apply a second, redundant
-// normalize pass, which is not a no-op: float normalize() is not perfectly
-// idempotent, so a second pass can land one ULP away from the first,
-// silently comparing against the wrong reference point.
-float float_angular_distance(const glm::quat& target, const glm::quat& cur)
-{
-    float d = std::fabs(glm::dot(glm::normalize(target), glm::normalize(cur)));
-    if (d > 1.0f) d = 1.0f;
-    return 2.0f * std::acos(d);
-}
-
-// Polish the closed-form Euler solution so that, once narrowed to float,
-// it reconstructs the input quaternion as closely as possible.
-//
-// The closed-form solve above is already accurate to roughly float
-// epsilon (~1e-7 rad) in double precision, which sounds sufficient — but
-// EulerSolution.angle and compose_chart's signature are both `float`, and
-// compose_chart itself narrows its double-computed quaternion back to
-// float before returning. So the function this solver actually needs to
-// invert is the doubly-rounded "float angle -> compose_chart -> float
-// quat", not the pure double-precision math above. Because that function
-// only changes value at float-representable steps (a staircase), a
-// derivative-based method is the wrong tool for the last mile: a small
-// finite-difference step can straddle zero, one, or several staircase
-// steps depending on where the base value sits.
-//
-// So instead this does a direct, bounded search of the float grid around
-// the closed-form estimate: for each of the three angles, try the float
-// itself plus its neighbors a few ULPs in either direction, evaluate every
-// combination through the exact float path compose_chart will take, and
-// keep whichever combination minimizes float_angular_distance against the
-// target quaternion. The search radius (kUlpRadius) trades how far the
-// closed-form estimate may be from the true best float against the
-// (kUlpRadius*2+1)^3 evaluations this costs.
-void refine_euler(const Chart& chart, const glm::quat& target, double theta[3])
-{
-    constexpr int kUlpRadius = 6;
-    constexpr int kSteps = kUlpRadius * 2 + 1;
-
-    const float base[3] = {static_cast<float>(theta[0]),
-                            static_cast<float>(theta[1]),
-                            static_cast<float>(theta[2])};
-
-    float candidates[3][kSteps];
-    for (int k = 0; k < 3; ++k) {
-        float v = base[k];
-        for (int s = 0; s < kUlpRadius; ++s)
-            v = std::nextafter(v, -std::numeric_limits<float>::infinity());
-        for (int s = 0; s < kSteps; ++s) {
-            candidates[k][s] = v;
-            v = std::nextafter(v, std::numeric_limits<float>::infinity());
-        }
-    }
-
-    float best[3] = {base[0], base[1], base[2]};
-    float best_err = float_angular_distance(target, compose_chart(chart, base));
-
-    for (int a = 0; a < kSteps; ++a)
-        for (int b = 0; b < kSteps; ++b)
-            for (int c = 0; c < kSteps; ++c) {
-                const float trial[3] = {candidates[0][a], candidates[1][b], candidates[2][c]};
-                const float err = float_angular_distance(target, compose_chart(chart, trial));
-                if (err < best_err) {
-                    best_err = err;
-                    best[0] = candidates[0][a];
-                    best[1] = candidates[1][b];
-                    best[2] = candidates[2][c];
-                }
-            }
-
-    theta[0] = best[0];
-    theta[1] = best[1];
-    theta[2] = best[2];
 }
 
 } // namespace
@@ -250,30 +169,14 @@ EulerSolution solve_euler(const glm::quat& qin, const Chart& chart)
         theta2 -= kHalfPiD;
     }
 
-    // Wrap into (-pi, pi] in double precision *before* refining: refine_euler
-    // searches the float neighborhood of its input, so the value handed to
-    // it must already be what will (modulo exact float rounding) come out
-    // the other end — otherwise wrap_pi's own float-precision subtraction
-    // could shift the chosen candidate off the neighborhood it was picked
-    // from.
+    // Wrap into (-pi, pi] in double precision; narrowing to float happens
+    // only in the return statement below.
     while (theta1 >  kPiD) theta1 -= 2.0 * kPiD;
     while (theta1 <= -kPiD) theta1 += 2.0 * kPiD;
     while (theta2 >  kPiD) theta2 -= 2.0 * kPiD;
     while (theta2 <= -kPiD) theta2 += 2.0 * kPiD;
     while (theta3 >  kPiD) theta3 -= 2.0 * kPiD;
     while (theta3 <= -kPiD) theta3 += 2.0 * kPiD;
-
-    {
-        // Refine against the raw, un-normalized `qin`, not `qn`: a caller
-        // comparing this solver's output against its own quaternion will
-        // normalize that raw value itself (see float_angular_distance's
-        // comment on why that must be a single pass, not two).
-        double theta[3] = {theta1, theta2, theta3};
-        refine_euler(chart, qin, theta);
-        theta1 = theta[0];
-        theta2 = theta[1];
-        theta3 = theta[2];
-    }
 
     return EulerSolution{{wrap_pi(static_cast<float>(theta1)),
                            wrap_pi(static_cast<float>(theta2)),

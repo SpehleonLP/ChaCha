@@ -115,6 +115,21 @@ float principal_difference(float current, float previous);
 // total squared step across all three axes from the previous frame (a
 // Viterbi/DP shortest path over the two-branch lattice), then unwraps the
 // chosen branch's angles into a continuous trajectory.
+//
+// The per-frame nearest-neighbour cost alone cannot disambiguate everything:
+// flipping EVERY frame's branch choice at once (chart-flip via
+// alternate_branch, an involution mod 2pi) leaves every transition cost
+// identical, so the whole path and its pointwise flip are always two
+// equally optimal solutions to the DP, for any input on any chart. After
+// reconstruction, resolve_branches breaks that whole-path tie by comparing
+// the reconstructed trajectory's summed squared distance from the rest pose
+// (all-zero angles) against its flip's, and keeps whichever is closer to
+// rest (ties keep the unflipped reconstruction). The single-frame (n == 1)
+// case applies the same nearest-rest criterion directly to the two
+// candidate branches, since there is no transition history to run the DP
+// over. This tie-break can only choose between the two twins; it cannot
+// perturb where a genuine, cost-driven mid-path branch switch occurs,
+// because both twins share every transition cost.
 Trajectory resolve_branches(
     std::span<const glm::quat> rel_rotations,
     std::span<const float>     times,

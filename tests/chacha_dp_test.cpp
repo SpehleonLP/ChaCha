@@ -152,9 +152,16 @@ TEST(DP, EmptyInputYieldsEmptyTrajectory)
     EXPECT_FLOAT_EQ(t.worst_conditioning, 1.0f);
 }
 
-// Contract: with a single frame there is no history to disambiguate
-// branches, so the branch-0 solution passes through unchanged.
-TEST(DP, SingleFramePassesThroughBranchZeroUnchanged)
+// Contract: with a single frame there is no transition history to run the
+// Viterbi tie-break over, so resolve_branches applies the same nearest-rest
+// criterion directly to the two candidate branches. For this input,
+// solve_euler's own principal branch (10, 20, 30) deg already IS the
+// nearest-rest branch (its alternate is (190, 160, 210) deg, far from
+// rest), so this also happens to equal what an unconditional "always
+// branch 0" rule would have produced -- this test alone cannot distinguish
+// the two policies; see SingleFrameResolvesNearestRestBranch below for a
+// case where they differ.
+TEST(DP, SingleFramePassesThroughNearestRestBranchUnchanged)
 {
     Chart c = tait_xyz();
     float angle[3] = {glm::radians(10.0f), glm::radians(20.0f), glm::radians(30.0f)};
@@ -172,6 +179,50 @@ TEST(DP, SingleFramePassesThroughBranchZeroUnchanged)
         EXPECT_NEAR(t.angle[a][0], expected.angle[a], 1e-6f) << "axis " << a;
     }
     EXPECT_FLOAT_EQ(t.worst_conditioning, chart_conditioning(expected, c));
+}
+
+// Pins the n == 1 nearest-rest behaviour where it actually differs from
+// "always take solve_euler's own branch 0": a single frame at (179, 89,
+// 179) degrees. Its own principal branch has squared rest-distance
+// (179^2 + 89^2 + 179^2) in degrees-squared ~= 72243 (deg^2) -- i.e. very
+// far from rest -- while its alternate_branch, (-1, 91, -1) degrees, has
+// squared rest-distance ~1+91^2+1 ~= 8283 deg^2, also far in absolute
+// terms but decisively closer than the principal branch's. Converted to
+// radians (as resolve_branches actually computes it) principal's squared
+// distance is ~22.0 against the alternate's ~2.52 -- confirmed by direct
+// computation below rather than asserted from the numbers alone. A resolver
+// that always took branch 0 unconditionally (the pre-fix behaviour) would
+// return the far-from-rest reading here; this test fails against that.
+TEST(DP, SingleFrameResolvesNearestRestBranch)
+{
+    Chart c = tait_xyz();
+    float angle[3] = {glm::radians(179.0f), glm::radians(89.0f), glm::radians(179.0f)};
+    glm::quat q = compose_chart(c, angle);
+    EulerSolution principal = solve_euler(q, c);
+    EulerSolution alternate = alternate_branch(principal, c);
+
+    auto sq_rest_dist = [](const EulerSolution& s) {
+        float d = 0.0f;
+        for (int a = 0; a < 3; ++a) {
+            float w = principal_difference(s.angle[a], 0.0f);
+            d += w * w;
+        }
+        return d;
+    };
+    const float principal_dist = sq_rest_dist(principal);
+    const float alternate_dist = sq_rest_dist(alternate);
+    // Pin the premise: the principal branch is NOT the nearest-rest one
+    // here, so "always branch 0" and "nearest rest" genuinely disagree.
+    ASSERT_GT(principal_dist, alternate_dist);
+
+    std::vector<glm::quat> rel = {q};
+    std::vector<float> times = {0.25f};
+    Trajectory t = resolve_branches(rel, times, c);
+
+    for (int a = 0; a < 3; ++a) {
+        ASSERT_EQ(t.angle[a].size(), 1u);
+        EXPECT_NEAR(t.angle[a][0], alternate.angle[a], 1e-5f) << "axis " << a;
+    }
 }
 
 // resolve_branches has a second, independent ambiguity from the one
@@ -216,6 +267,65 @@ TEST(DP, ResolvesToNearRestFamilyNotFarFamily)
         EXPECT_LT(std::fabs(glm::degrees(t.angle[1][i])), 90.0f) << "at " << i;
         EXPECT_LT(std::fabs(glm::degrees(t.angle[2][i])), 90.0f) << "at " << i;
     }
+}
+
+// The seed this task replaced picked a family using only frame 0's distance
+// from rest, which is wrong whenever frame 0 favours one family but the
+// REST of the path favours the other: the family flip is a whole-path
+// property (see the NOTE in resolve_branches), and a per-frame or seed-based
+// heuristic cannot see that. This is the reviewer's counterexample: A sweeps
+// (5,5,5) -> (60,40,60) degrees (near rest throughout, no ambiguity); B
+// sweeps (170,85,170) -> (5,5,5) degrees, so frame 0 alone favours the FAR
+// family (170,85,170 is closer to (180,90,180)'s neighbourhood than to
+// rest... actually the reviewer's point is sharper: B's frame 0 principal
+// reading is nearer to the ALTERNATE branch than to rest, even though B's
+// path overall -- and certainly its last frame, (5,5,5) -- is near rest.
+// A frame-0-only seed anchors B to the wrong family for its whole path
+// before the DP ever runs; the whole-path post-pass instead looks at where
+// B's reconstructed trajectory as a whole sits.
+// Verified explicitly (see task-5-report.md fix-round-2 section): this
+// test FAILS against the frame-0 seed (union ~235 degrees against the true
+// 165), not merely against the fully-unpatched zero-seeded code.
+TEST(DP, WholePathRestDistanceOutweighsFrameZero)
+{
+    Chart c = tait_xyz();
+    auto sweep3 = [&](float x0, float y0, float z0, float x1, float y1, float z1) {
+        std::vector<glm::quat> rel;
+        std::vector<float> times;
+        for (int i = 0; i <= 20; ++i) {
+            float f = static_cast<float>(i) / 20.0f;
+            float angle[3] = {
+                glm::radians(x0 + f * (x1 - x0)),
+                glm::radians(y0 + f * (y1 - y0)),
+                glm::radians(z0 + f * (z1 - z0)),
+            };
+            rel.push_back(compose_chart(c, angle));
+            times.push_back(i * 0.02f);
+        }
+        return std::make_pair(rel, times);
+    };
+
+    auto [ra, ta] = sweep3(5.0f, 5.0f, 5.0f, 60.0f, 40.0f, 60.0f);
+    auto [rb, tb] = sweep3(170.0f, 85.0f, 170.0f, 5.0f, 5.0f, 5.0f);
+
+    Trajectory a = resolve_branches(ra, ta, c);
+    Trajectory b = resolve_branches(rb, tb, c);
+
+    const float zero_ref[3] = {0.0f, 0.0f, 0.0f};
+    anchor_trajectory(a, zero_ref);
+
+    float a_lo = *std::min_element(a.angle[0].begin(), a.angle[0].end());
+    float a_hi = *std::max_element(a.angle[0].begin(), a.angle[0].end());
+    const float a_ref[3] = {0.5f * (a_lo + a_hi), 0.0f, 0.0f};
+    anchor_trajectory(b, a_ref);
+
+    float lo = std::min(*std::min_element(a.angle[0].begin(), a.angle[0].end()),
+                        *std::min_element(b.angle[0].begin(), b.angle[0].end()));
+    float hi = std::max(*std::max_element(a.angle[0].begin(), a.angle[0].end()),
+                        *std::max_element(b.angle[0].begin(), b.angle[0].end()));
+
+    // True excursion is 5..170 degrees, i.e. 165 degrees wide.
+    EXPECT_NEAR(glm::degrees(hi - lo), 165.0f, 1.0f);
 }
 
 // The scenario anchor_trajectory exists for, exercised end to end: two
@@ -263,11 +373,20 @@ TEST(DP, AnchoringKeepsIndependentAnimationsCommensurable_ThroughResolveBranches
     EXPECT_LT(glm::degrees(hi - lo), 40.0f);
 }
 
-// A more direct cross-animation range check: two sweeps of one joint,
-// 0 -> 30 and -20 -> 20 degrees, pushed through resolve_branches and
-// anchored against a running reference. The true excursion is -20..30
-// degrees (50 degrees wide); a family or wrap-boundary mismatch between the
-// two independently-resolved trajectories would corrupt this union.
+// A more direct cross-animation range check that genuinely exercises the
+// +-180 wrap boundary anchor_trajectory exists for (an earlier version of
+// this test used 0->30 / -20->20 degree sweeps, neither of which crosses
+// +-180 at all: both resolve_branches's family fix AND a no-op
+// anchor_trajectory would pass it unioned as-is, since -20..30 needs no 2pi
+// shift to read correctly. That made half the test's own comment -- "guards
+// a wrap-boundary mismatch" -- vacuous. Verified directly: 170->195 /
+// 200->220 degrees is not vacuous. 170->195 stays on the near side of the
+// wrap (resolves to 170..195 directly); 200->220 reads on the FAR side
+// (resolves to -160..-140, since solve_euler's principal branch wraps
+// there), so the raw, un-anchored union is a spurious 355 degrees, and only
+// with anchor_trajectory does it collapse to the true 170..220 degree
+// (50 degree) excursion -- verified both numbers directly against this
+// exact construction.
 TEST(DP, CrossAnimationRangeUnionMatchesTrueExcursion)
 {
     auto build = [](float from_deg, float to_deg) {
@@ -281,11 +400,22 @@ TEST(DP, CrossAnimationRangeUnionMatchesTrueExcursion)
         return std::make_pair(rel, times);
     };
 
-    auto [rc, tc] = build(0.0f, 30.0f);
-    auto [rd, td] = build(-20.0f, 20.0f);
+    auto [rc, tc] = build(170.0f, 195.0f);
+    auto [rd, td] = build(200.0f, 220.0f);
 
     Trajectory c = resolve_branches(rc, tc, tait_xyz());
     Trajectory d = resolve_branches(rd, td, tait_xyz());
+
+    // Without anchoring, the raw union is spurious: c reads 170..195, d
+    // reads on the other side of the wrap (-160..-140), so their raw union
+    // spans ~355 degrees. This is not itself an assertion (anchor_trajectory
+    // is the function under test, not resolve_branches's raw output), but
+    // pins the premise that this construction actually needs the anchor.
+    float raw_lo = std::min(*std::min_element(c.angle[0].begin(), c.angle[0].end()),
+                            *std::min_element(d.angle[0].begin(), d.angle[0].end()));
+    float raw_hi = std::max(*std::max_element(c.angle[0].begin(), c.angle[0].end()),
+                            *std::max_element(d.angle[0].begin(), d.angle[0].end()));
+    ASSERT_GT(glm::degrees(raw_hi - raw_lo), 300.0f);
 
     const float zero_ref[3] = {0.0f, 0.0f, 0.0f};
     anchor_trajectory(c, zero_ref);
@@ -300,6 +430,7 @@ TEST(DP, CrossAnimationRangeUnionMatchesTrueExcursion)
     float hi = std::max(*std::max_element(c.angle[0].begin(), c.angle[0].end()),
                         *std::max_element(d.angle[0].begin(), d.angle[0].end()));
 
+    // True excursion is 170..220 degrees, i.e. 50 degrees wide.
     EXPECT_NEAR(glm::degrees(hi - lo), 50.0f, 1.0f);
 }
 

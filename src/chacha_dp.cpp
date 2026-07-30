@@ -45,10 +45,24 @@ Trajectory resolve_branches(
 
     if (n == 1) {
         out.time.assign(times.begin(), times.begin() + 1);
-        // With a single frame there is no history to disambiguate branches;
-        // arbitrarily (but deterministically) take branch 0.
-        for (int a = 0; a < 3; ++a) out.angle[a].assign(1, cand[0].angle[a]);
-        out.worst_conditioning = cond[0];
+        // With a single frame there is no history to disambiguate branches
+        // via transition cost, but the two branches are not equally good
+        // readings: one may sit near the rest pose and the other near its
+        // chart-flip antipode (e.g. (179,89,179) deg vs (-1,91,-1) deg have
+        // squared rest-distances 21.9 vs ~0.0006). Pick whichever branch is
+        // closer to the rest pose (all-zero angles) -- the same criterion
+        // the n>1 path below applies to a whole reconstructed trajectory,
+        // collapsed to a single frame.
+        float d0 = 0.0f, d1 = 0.0f;
+        for (int a = 0; a < 3; ++a) {
+            float w0 = principal_difference(cand[0].angle[a], 0.0f);
+            float w1 = principal_difference(cand[1].angle[a], 0.0f);
+            d0 += w0 * w0;
+            d1 += w1 * w1;
+        }
+        const int best = (d1 < d0) ? 1 : 0;
+        for (int a = 0; a < 3; ++a) out.angle[a].assign(1, cand[best].angle[a]);
+        out.worst_conditioning = cond[best];
         return out;
     }
 
@@ -72,41 +86,29 @@ Trajectory resolve_branches(
 
     reachable[0] = true;
     reachable[1] = true;
+    cost[0] = 0.0f;
+    cost[1] = 0.0f;
 
-    // Seed t==0 with each branch's squared distance from the rest pose
-    // (all-zero angles), scaled by 1e-3. Without this, the whole-path cost
-    // of staying entirely on solve_euler's principal branch is an EXACT tie
-    // (up to float rounding) with staying entirely on its alternate_branch
-    // twin, for every input on every chart: alternate_branch is
-    // (a0+pi, pi-a1, a2+pi) for Tait-Bryan charts and (a0+pi, -a1, a2+pi) for
-    // proper-Euler charts, and the Viterbi cost only ever sums consecutive
-    // differences, so the constant +-pi offsets cancel exactly on axes 0 and
-    // 2, and negating axis 1 about pi leaves its square unchanged. That tie
-    // is then broken only by float rounding noise (~1e-5 scale), so which
-    // "family" resolve_branches returns for a given input is otherwise
-    // arbitrary. Seeding with distance-from-rest breaks the tie in favor of
-    // the physically meaningful reading: a joint at rest should decompose
-    // near (0,0,0), not near (180,180,180).
-    //
-    // The 1e-3 scale is load-bearing: do not drop it or round it to a
-    // "nicer" constant. An unscaled seed can reach 3*pi^2 (~29.6, when a
-    // frame's principal-branch reading sits near the far side of the
-    // circle on all three axes), which exceeds the ~20 transition cost of a
-    // genuine mid-path branch switch (see DP.SwitchesBranchAcrossChartSingularity)
-    // and would suppress that legitimate switch. At 1e-3 the seed is
-    // decisive against the ~1e-5 float-rounding noise that would otherwise
-    // decide the tie, while staying negligible against any real transition
-    // cost, so it only ever breaks exact (or near-exact) ties and never
-    // overrides a genuine mid-path switch.
-    for (int b = 0; b < 2; ++b) {
-        float s = 0.0f;
-        for (int a = 0; a < 3; ++a) {
-            float w = principal_difference(cand[b].angle[a], 0.0f);
-            s += w * w;
-        }
-        cost[b] = 1e-3f * s;
-    }
-
+    // NOTE on a whole-path ambiguity the DP below cannot see or resolve:
+    // alternate_branch is (a0+pi, pi-a1, a2+pi) for Tait-Bryan charts and
+    // (a0+pi, -a1, a2+pi) for proper-Euler charts -- an involution mod 2pi.
+    // Because the Viterbi cost below only ever sums *consecutive*
+    // differences, flipping EVERY frame's branch choice at once (chosen[t]
+    // -> chosen[t] ^ 1 for all t) leaves every transition cost identical:
+    // the constant +-pi offsets on axes 0 and 2 cancel exactly in any
+    // consecutive difference, and negating axis 1 about pi leaves its
+    // square unchanged. So `chosen` and its pointwise flip are two equally
+    // optimal solutions to this DP, always, for every input on every chart
+    // -- not just a corner case. Which one gets reconstructed if left to
+    // this loop's `total < best` tie-breaking is decided by float-rounding
+    // noise on the accumulated cost, not by anything physically meaningful,
+    // and the two differ by a global ~180 degree relabelling (a joint at
+    // rest can come out reading (0,0,0) or (180,180,180) depending on which
+    // twin won). This is resolved *after* reconstruction, below, by
+    // comparing the whole path's distance from the rest pose against its
+    // flip's -- deliberately not here, since any per-frame or seed-based
+    // tie-break only sees frame 0 and can be wrong when frame 0 favours the
+    // opposite family from the rest of the path.
     for (int t = 1; t < n; ++t) {
         for (int b = 0; b < 2; ++b) {
             float best = std::numeric_limits<float>::infinity();
@@ -153,6 +155,43 @@ Trajectory resolve_branches(
                                            cand[(t - 1) * 2 + chosen[t - 1]].angle[a]);
             out.angle[a][t] = out.angle[a][t - 1] + d;
         }
+
+    // Whole-path tie-break (see the NOTE above the Viterbi loop): `chosen`
+    // and its pointwise flip are both valid, equally-costed reconstructions
+    // of this rotation sequence. Reconstruct the flipped path the same way
+    // and keep whichever of the two sits closer to the rest pose overall,
+    // summed across every frame and axis; an exact tie keeps the unflipped
+    // (as computed above) reconstruction. This can only choose between the
+    // two twins -- it cannot alter where a genuine, cost-driven mid-path
+    // branch switch happens, because both twins share every transition cost.
+    {
+        std::vector<float> flipped[3];
+        for (int a = 0; a < 3; ++a) flipped[a].resize(static_cast<size_t>(n));
+
+        for (int a = 0; a < 3; ++a)
+            flipped[a][0] = cand[0 * 2 + (chosen[0] ^ 1)].angle[a];
+
+        for (int t = 1; t < n; ++t)
+            for (int a = 0; a < 3; ++a) {
+                float d = principal_difference(cand[t * 2 + (chosen[t] ^ 1)].angle[a],
+                                               cand[(t - 1) * 2 + (chosen[t - 1] ^ 1)].angle[a]);
+                flipped[a][t] = flipped[a][t - 1] + d;
+            }
+
+        float dist_chosen = 0.0f, dist_flipped = 0.0f;
+        for (int t = 0; t < n; ++t)
+            for (int a = 0; a < 3; ++a) {
+                float dc = principal_difference(out.angle[a][t], 0.0f);
+                dist_chosen += dc * dc;
+                float df = principal_difference(flipped[a][t], 0.0f);
+                dist_flipped += df * df;
+            }
+
+        if (dist_flipped < dist_chosen) {
+            for (int a = 0; a < 3; ++a) out.angle[a] = std::move(flipped[a]);
+            for (int t = 0; t < n; ++t) chosen[t] = static_cast<uint8_t>(chosen[t] ^ 1);
+        }
+    }
 
     out.worst_conditioning = 1.0f;
     for (int t = 0; t < n; ++t)

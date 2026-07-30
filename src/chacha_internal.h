@@ -176,9 +176,10 @@ void union_into(CandidateSummary& dst, const CandidateSummary& src);
 // quaternion.
 float solve_one_dof(const glm::quat& q, int axis);
 
-// Angular distance (radians, via the acos(|dot|) metric) between q and the
-// single-axis rotation axis_quat(axis, angle). Large for motion that a
-// single axis cannot represent.
+// Angular distance (radians, via the well-conditioned log-map metric --
+// see quaternion_angular_distance below) between q and the single-axis rotation
+// axis_quat(axis, angle). Large for motion that a single axis cannot
+// represent.
 float residual_one_dof(const glm::quat& q, int axis, float angle);
 
 // Gauss-Newton refinement of a 2-axis composition axis_quat(axis0, a0) *
@@ -190,6 +191,13 @@ void solve_two_dof(const glm::quat& q, int axis0, int axis1,
 // Angular distance (radians) between q and the 2-axis composition
 // axis_quat(axis0, a[0]) * axis_quat(axis1, a[1]).
 float residual_two_dof(const glm::quat& q, int axis0, int axis1, const float a[2]);
+
+// Angular distance (radians) between two unit quaternions, via
+// 2*atan2(|v|, |w|) of their relative rotation rather than acos(|dot|) --
+// well-conditioned near zero error, unlike acos (see chacha_reduced.cpp).
+// General-purpose: used by residual_one_dof/residual_two_dof above and by
+// evaluate_chart's real (not assumed-zero) round-trip residual.
+float quaternion_angular_distance(const glm::quat& a, const glm::quat& b);
 
 // One joint's rest-pose-relative rotation across every animation that
 // touches it. Each inner vector of rel_by_animation/times_by_animation is
@@ -204,9 +212,30 @@ struct JointMotion {
 // CandidateSummary accumulated (unioned) across every animation in a
 // JointMotion. `proper` mirrors Chart::proper for dof == 3 candidates and
 // is meaningless otherwise.
+//
+// Only slots [0, dof) are meaningful. Trailing unused slots are set to
+// StageType::Invalid / axis -1, an explicit sentinel rather than the
+// enum's/int's zero value (StageType::xTranslate / axis 0), so a caller
+// that forgets to bound its read by `dof` gets an obviously-wrong sentinel
+// instead of a plausible-looking-but-fabricated translation stage.
+//
+// IMPORTANT for any consumer (Task 10 and downstream): for the 6 of 12
+// three-axis charts where `proper == true` (axis[0] == axis[2], e.g.
+// ZXZ), stage[0] and stage[2] are the SAME StageType by construction (the
+// same physical axis rotated twice, once before and once after the middle
+// stage). This is legal AGI_articulations semantics, not a bug: stages
+// apply in order of appearance as an ordered sequence after the node's own
+// transform, and a proper-Euler decomposition genuinely needs to name the
+// same axis twice with two different, independent ranges. Do not key
+// Candidate::summary or downstream Stage lists by StageType -- always
+// index by slot/occurrence order (see Task 12's `stage_name_for(type,
+// occurrence)`, which exists specifically to disambiguate this). See
+// Search.ProperEulerWinnerCanRepeatAStageType in chacha_search_test.cpp,
+// which pins that this collision is real, observed, and expected rather
+// than something to "fix" by changing the slot convention.
 struct Candidate {
-    StageType        stage[3]{};
-    int              axis[3]{};
+    StageType        stage[3]{StageType::Invalid, StageType::Invalid, StageType::Invalid};
+    int              axis[3]{-1, -1, -1};
     int              dof{0};
     bool             proper{false};
     CandidateSummary summary;

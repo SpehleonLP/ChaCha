@@ -5,8 +5,6 @@
 namespace ChaCha {
 namespace detail {
 
-namespace {
-
 // Angular distance between two unit quaternions, measured via the relative
 // rotation's own log map rather than acos(|dot|). acos is ill-conditioned
 // near zero error (its derivative blows up as the argument approaches 1),
@@ -15,12 +13,18 @@ namespace {
 // the identity and remains well conditioned across the whole range that
 // matters here. Task 2 established the same substitution for its own
 // round-trip metric, dropping its noise floor from ~9e-4 rad to ~2-3e-7 rad.
-float angular_distance(const glm::quat& a, const glm::quat& b)
+//
+// Exposed (not file-local) because chacha_search.cpp's evaluate_chart needs
+// the same well-conditioned metric to measure a chart candidate's real
+// round-trip residual instead of assuming it is exactly zero.
+float quaternion_angular_distance(const glm::quat& a, const glm::quat& b)
 {
     const glm::quat rel = glm::inverse(glm::normalize(a)) * glm::normalize(b);
     const glm::vec3 v(rel.x, rel.y, rel.z);
     return 2.0f * std::atan2(glm::length(v), std::fabs(rel.w));
 }
+
+namespace {
 
 // Log map of a unit quaternion into the tangent space at identity.
 glm::vec3 log_map(glm::quat q)
@@ -56,12 +60,12 @@ float solve_one_dof(const glm::quat& q, int axis)
 
 float residual_one_dof(const glm::quat& q, int axis, float angle)
 {
-    return angular_distance(axis_quat(axis, angle), q);
+    return quaternion_angular_distance(axis_quat(axis, angle), q);
 }
 
 float residual_two_dof(const glm::quat& q, int axis0, int axis1, const float a[2])
 {
-    return angular_distance(axis_quat(axis0, a[0]) * axis_quat(axis1, a[1]), q);
+    return quaternion_angular_distance(axis_quat(axis0, a[0]) * axis_quat(axis1, a[1]), q);
 }
 
 // Gauss-Newton on the 3-vector residual r(t) = log( R(t)^-1 * q ), two unknowns.
@@ -73,6 +77,22 @@ float residual_two_dof(const glm::quat& q, int axis0, int axis1, const float a[2
 // already far outside the ~0.02 rad accept/reject gate Task 8 uses, so it
 // never flips an accept/reject decision. No behaviour change made for this;
 // noted here so a future reader doesn't mistake it for a correctness bug.
+//
+// Warm-seeded cost, measured against Task 8's actual frame-to-frame usage
+// pattern (not the random-target benchmark above): only around ~0.7-0.8 us
+// per call, close to the single-iteration cost, when BOTH the seed is warm
+// AND the target motion is genuinely well explained by this specific
+// (axis0, axis1) ordered pair -- both of this function's early exits
+// (residual norm < 1e-7, step size < 1e-7) fire almost immediately.
+// Otherwise -- a warm seed against motion this ordered pair does not fit
+// well, which is the common case, since Task 8's select_candidate tries
+// all 6 ordered pairs and by construction 5 of them are "wrong" for any
+// given joint -- NEITHER exit condition is ever satisfied and the solve
+// runs close to the full 24-iteration cap on every single frame regardless
+// of warm-seeding, at roughly 7-7.2 us per call (about 10x the well-fit
+// case, not the roughly-14x-cheaper number a reader might assume warm
+// seeding always buys). This is the dominant cost in select_candidate's
+// two-DOF phase in the common case where no 2-axis pair actually fits.
 void solve_two_dof(const glm::quat& q, int axis0, int axis1,
                    const float seed[2], float out[2])
 {

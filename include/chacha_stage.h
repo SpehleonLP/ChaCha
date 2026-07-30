@@ -15,6 +15,11 @@ enum class StageType : uint8_t {
     xScale,
     yScale,
     zScale,
+    // Sentinel for "this slot carries no stage" (e.g. an unused trailing
+    // slot in Candidate::stage, see chacha_internal.h). Never appears on a
+    // real Stage produced by analyze(); appended after the real AGI values
+    // so it cannot collide with a valid StageType.
+    Invalid,
 };
 
 struct Stage {

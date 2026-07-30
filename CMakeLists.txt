@@ -1,4 +1,22 @@
 cmake_minimum_required(VERSION 3.15)
+
+# A plain `cmake -S . -B build` with no explicit -DCMAKE_BUILD_TYPE leaves
+# CMAKE_BUILD_TYPE empty on single-config generators, which builds with no
+# optimisation flags at all. Task 8's search (`select_candidate`) is
+# expensive enough that this is not just slow but budget-breaking: measured
+# at full model scale (88 animations x 157 frames x 49 joints), the general
+# three-axis case takes 32.9s under RelWithDebInfo but 120.0s unoptimised --
+# landing exactly on Task 16's 120s guard on this machine, and over it on a
+# slower CI box. Default to RelWithDebInfo (matches what every measurement
+# in this codebase's comments and reports assumes) rather than leaving the
+# choice to whatever the ambient environment happens to default to; a
+# caller can still override with -DCMAKE_BUILD_TYPE=... as usual.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif()
+
 project(chacha VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

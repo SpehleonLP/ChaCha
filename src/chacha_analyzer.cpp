@@ -83,6 +83,35 @@ std::vector<int> resolve_scan(
     return out;
 }
 
+// True exactly when resolve_scan (above) narrowed the scan to "AGI
+// "-prefixed animations because the caller passed no explicit scan, asked
+// for the narrowing (options.prioritize_rom_animations), and at least one
+// such animation exists -- i.e. exactly resolve_scan's own "artist-authored
+// spec wins outright" branch. Recomputes the same condition rather than
+// having resolve_scan report it via an out-parameter, since resolve_scan is
+// used standalone elsewhere; this keeps that signature untouched.
+//
+// This is the gate the configuration fast path (is_configuration_motion /
+// solve_configuration) requires in addition to shape detection: shape
+// alone is not sufficient evidence that an animation is an artist's
+// deliberate constraint specification -- an ordinary walk cycle can
+// happen to move one axis at a time too (see
+// Analyze.OrdinaryAnimationWithConfigurationShapeDoesNotFastPathWithoutAgiNarrowing
+// in chacha_analyze_test.cpp for a directly observed case). Only when the
+// caller's own "AGI " narrowing contract is actually in effect does shape
+// additionally get checked to confirm the motion really behaves like a
+// specification, and only then does the fast path fire.
+bool scan_is_agi_narrowed(
+    std::span<const Animation> animations,
+    std::span<const int>       scan,
+    const Options&             options)
+{
+    if (!scan.empty() || !options.prioritize_rom_animations) return false;
+    for (const auto& a : animations)
+        if (starts_with_agi(a.name)) return true;
+    return false;
+}
+
 } // namespace detail
 
 std::vector<Articulation> analyze(
@@ -116,7 +145,8 @@ std::vector<Articulation> analyze(
         return {};
     }
 
-    const std::vector<int> scanned = resolve_scan(animations, scan, options);
+    const std::vector<int> scanned          = resolve_scan(animations, scan, options);
+    const bool             agi_narrowed_scan = scan_is_agi_narrowed(animations, scan, options);
     std::vector<bool> in_scan(animations.size(), false);
     for (int a : scanned)
         if (a >= 0 && a < static_cast<int>(animations.size())) in_scan[a] = true;
@@ -286,16 +316,21 @@ std::vector<Articulation> analyze(
     for (const auto& [node, motion] : rotation_by_node) {
         // An artist-authored configuration animation is a direct
         // specification: it declares the stage set, order and range, so
-        // no search is run. resolve_scan already narrowed the scan to
-        // "AGI "-prefixed animations when scanning all and any exist, but
-        // that only selects WHICH animations were scanned -- it says
-        // nothing about whether the motion actually has configuration
-        // shape (one axis at a time, returning to rest between phases).
-        // is_configuration_motion checks the shape itself, so an
-        // AGI-named animation that doesn't actually behave like one falls
-        // back to the search below rather than emitting a fabricated
-        // stage order.
-        Candidate c = is_configuration_motion(motion, options)
+        // no search is run. But shape alone (one axis at a time,
+        // returning to rest between phases) is not sufficient evidence of
+        // deliberate authorship -- ordinary motion can happen to have that
+        // shape too. The fast path requires BOTH: `agi_narrowed_scan`
+        // confirms the caller's own "AGI "-prefix contract actually
+        // applied to this analyze() call (resolve_scan narrowed the scan
+        // because no explicit scan was given, narrowing was requested,
+        // and at least one such animation exists), and
+        // is_configuration_motion confirms this specific joint's motion
+        // within that scan actually behaves like a specification. An
+        // AGI-named animation whose motion doesn't have configuration
+        // shape still falls back to the search below rather than emitting
+        // a fabricated stage order; an ordinary (non-AGI-narrowed) scan
+        // never reaches solve_configuration regardless of shape.
+        Candidate c = (agi_narrowed_scan && is_configuration_motion(motion, options))
                     ? solve_configuration(motion, options)
                     : select_candidate(motion, options);
         if (!c.summary.valid) continue;

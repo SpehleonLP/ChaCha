@@ -537,3 +537,148 @@ TEST(Analyze, AgiNamedButNonConfigurationShapedMotionFallsBackToSearch)
     EXPECT_FALSE(out[0].stages.empty());
     EXPECT_GE(out[0].dof_count, 2);
 }
+
+namespace {
+// Builds the values/times for a 3-phase configuration sweep: X, then Z,
+// then Y, each a half-sine 0 -> peak -> 0 back to rest. Mirrors
+// Config.RecoversStageOrderAndRange's own fixture in chacha_config_test.cpp
+// (kept independent rather than shared, since these two files test
+// different layers: the pure function there, analyze()'s end-to-end
+// wiring and gating here).
+void build_xzy_configuration_sweep(std::vector<float>& times, std::vector<float>& values)
+{
+    const glm::vec3 axes[3] = {glm::vec3(1, 0, 0), glm::vec3(0, 0, 1), glm::vec3(0, 1, 0)};
+    int frame = 0;
+    for (int phase = 0; phase < 3; ++phase) {
+        for (int i = 0; i <= 40; ++i) {
+            const float f   = static_cast<float>(i) / 40.0f;
+            const float deg = 13.4f * std::sin(f * 2.0f * 3.14159265f);
+            glm::quat q = glm::angleAxis(glm::radians(deg), axes[phase]);
+            values.insert(values.end(), {q.x, q.y, q.z, q.w});
+            times.push_back(frame++ / 24.0f);
+        }
+    }
+}
+} // namespace
+
+// The headline claim of this task: an artist-authored configuration
+// animation run through the PUBLIC analyze() entry point yields stages in
+// the AUTHORED order (X, Z, Y), not the chart search's own order. The
+// chart search demonstrably gets this wrong for this exact input (see
+// Analyze.OrdinaryAnimationWithConfigurationShapeDoesNotFastPathWithoutAgiNarrowing
+// below, which exercises the identical motion without "AGI " narrowing and
+// documents what the search actually returns) -- so this is not a
+// redundant check against a path that would have gotten it right anyway.
+TEST(Analyze, ConfigurationAnimationYieldsAuthoredStageOrderNotSearchOrder)
+{
+    Rig rig;
+    std::vector<float> times, values;
+    build_xzy_configuration_sweep(times, values);
+
+    AnimationChannel ch;
+    ch.node = 0; ch.animation = 0; ch.property = Property::Rotation;
+    ch.times = times; ch.values = values;
+
+    std::vector<AnimationChannel> chans{ch};
+    std::vector<Animation> anims{Animation{"AGI configuration"}};
+
+    auto out = analyze(chans, anims, rig.skeleton());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].stages.size(), 3u);
+    EXPECT_EQ(out[0].stages[0].type, StageType::xRotate);
+    EXPECT_EQ(out[0].stages[1].type, StageType::zRotate);
+    EXPECT_EQ(out[0].stages[2].type, StageType::yRotate);
+    for (const auto& stage : out[0].stages) {
+        EXPECT_NEAR(glm::degrees(stage.min_value), -13.4f, 1.0f);
+        EXPECT_NEAR(glm::degrees(stage.max_value),  13.4f, 1.0f);
+    }
+}
+
+// is_configuration_motion fires on SHAPE ALONE; it must not fire without
+// corroborating evidence that the animation is genuinely an artist's
+// deliberate specification, because ordinary motion can happen to have
+// configuration shape too. This test feeds analyze() the EXACT SAME
+// motion as ConfigurationAnimationYieldsAuthoredStageOrderNotSearchOrder
+// above, differing only in the animation's name ("walk", not "AGI ..."),
+// so resolve_scan never narrows and the fast path's gate
+// (agi_narrowed_scan) never opens regardless of shape. The output must
+// come from select_candidate's chart search instead, which -- for this
+// input -- picks a different (non-authored) stage order: this is observed
+// and pinned, not assumed, precisely so this test cannot quietly degrade
+// into "any 3-stage output passes."
+TEST(Analyze, OrdinaryAnimationWithConfigurationShapeDoesNotFastPathWithoutAgiNarrowing)
+{
+    Rig rig;
+    std::vector<float> times, values;
+    build_xzy_configuration_sweep(times, values);
+
+    AnimationChannel ch;
+    ch.node = 0; ch.animation = 0; ch.property = Property::Rotation;
+    ch.times = times; ch.values = values;
+
+    std::vector<AnimationChannel> chans{ch};
+    std::vector<Animation> anims{Animation{"walk"}};   // no "AGI " prefix
+
+    auto out = analyze(chans, anims, rig.skeleton());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].stages.size(), 3u);
+    // The chart search's own order for this input, observed directly:
+    // axis index order (X, Y, Z), NOT the authored (X, Z, Y) order the
+    // "AGI "-narrowed test above reports for byte-identical motion.
+    EXPECT_EQ(out[0].stages[0].type, StageType::xRotate);
+    EXPECT_EQ(out[0].stages[1].type, StageType::yRotate);
+    EXPECT_EQ(out[0].stages[2].type, StageType::zRotate);
+}
+
+// Integration-level counterpart to
+// Config.MultipleAnimationsUnionRangesButFirstAnimationSetsOrder: a joint
+// driven by two separately-authored "AGI "-prefixed clips (as in the
+// "AGI Configuration" / "AGI Configuration.001" pair some real models
+// use) must report stage order from the first clip and union ranges from
+// the second, end to end through the public analyze() entry point and
+// resolve_scan's real narrowing -- not just in the pure function tested
+// directly in chacha_config_test.cpp.
+TEST(Analyze, MultipleAgiAnimationsUnionRangesWithFirstAnimationSettingOrder)
+{
+    Rig rig;
+
+    auto build_sweep = [](const glm::vec3& axis, float peak_deg,
+                           std::vector<float>& times, std::vector<float>& values, int& frame) {
+        for (int i = 0; i <= 20; ++i) {
+            const float f   = static_cast<float>(i) / 20.0f;
+            const float deg = peak_deg * std::sin(f * 3.14159265f);
+            glm::quat q = glm::angleAxis(glm::radians(deg), axis);
+            values.insert(values.end(), {q.x, q.y, q.z, q.w});
+            times.push_back(frame++ / 24.0f);
+        }
+    };
+
+    std::vector<float> times0, values0;
+    int frame0 = 0;
+    build_sweep(glm::vec3(0, 0, 1), 5.0f,  times0, values0, frame0);   // Z
+    build_sweep(glm::vec3(1, 0, 0), 10.0f, times0, values0, frame0);   // X
+
+    std::vector<float> times1, values1;
+    int frame1 = 0;
+    build_sweep(glm::vec3(1, 0, 0), 15.0f, times1, values1, frame1);   // X, wider
+    build_sweep(glm::vec3(0, 1, 0), 3.0f,  times1, values1, frame1);   // Y, new
+
+    AnimationChannel ch0;
+    ch0.node = 0; ch0.animation = 0; ch0.property = Property::Rotation;
+    ch0.times = times0; ch0.values = values0;
+
+    AnimationChannel ch1;
+    ch1.node = 0; ch1.animation = 1; ch1.property = Property::Rotation;
+    ch1.times = times1; ch1.values = values1;
+
+    std::vector<AnimationChannel> chans{ch0, ch1};
+    std::vector<Animation> anims{Animation{"AGI Configuration"}, Animation{"AGI Configuration.001"}};
+
+    auto out = analyze(chans, anims, rig.skeleton());
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out[0].stages.size(), 3u);
+    EXPECT_EQ(out[0].stages[0].type, StageType::zRotate);
+    EXPECT_EQ(out[0].stages[1].type, StageType::xRotate);
+    EXPECT_EQ(out[0].stages[2].type, StageType::yRotate);
+    EXPECT_NEAR(glm::degrees(out[0].stages[1].max_value), 15.0f, 1.0f);
+}

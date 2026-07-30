@@ -149,6 +149,11 @@ void anchor_trajectory(Trajectory& t, const float reference[3]);
 // translation (metres) and scale (unitless factor) trajectories alike.
 struct CandidateSummary {
     bool  valid{false};
+    // Per-axis: whether this axis actually had observed samples. An axis
+    // with no samples must not participate in union_into's min/max (its
+    // zero-initialised min_value/max_value are not a real observed range
+    // and must never drag another summary's range toward zero).
+    bool  axis_valid[3]{};
     float min_value[3]{};
     float max_value[3]{};
     float max_velocity[3]{};

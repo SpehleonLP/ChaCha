@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "chacha_internal.h"
 #include <glm/gtc/quaternion.hpp>
+#include <algorithm>
+#include <utility>
 #include <vector>
 
 using namespace ChaCha::detail;
@@ -170,4 +172,131 @@ TEST(DP, SingleFramePassesThroughBranchZeroUnchanged)
         EXPECT_NEAR(t.angle[a][0], expected.angle[a], 1e-6f) << "axis " << a;
     }
     EXPECT_FLOAT_EQ(t.worst_conditioning, chart_conditioning(expected, c));
+}
+
+// Two animations of one joint that straddle +-180 degrees from opposite sides
+// must anchor into a common frame, or their union spans a spurious ~360 degrees.
+//
+// This builds the two Trajectory objects directly rather than routing them
+// through resolve_branches. resolve_branches's Viterbi resolves a *second*,
+// independent ambiguity for a pure single-axis rotation: the whole-path cost
+// of staying on solve_euler's principal branch is exactly tied (up to float
+// rounding) with the whole-path cost of staying on its chart-flip alternate
+// (alternate_branch is an exact isometry of the squared-step metric, constant
+// offsets cancel in every consecutive difference) -- verified directly: for
+// this test's own two sweeps computed by hand, resolve_branches picked
+// opposite chart-flip families for the two animations (one landed on
+// (angle0, 0, 0), the other on (angle0, 180, 180)), a ~180 degree family
+// mismatch that no multiple-of-2pi shift on axis 0 can repair. That is a
+// resolve_branches/chart concern (a discrete branch-labelling ambiguity),
+// not the continuous 2pi wrap-boundary ambiguity anchor_trajectory exists to
+// fix, so it is tested here by constructing the Trajectory inputs directly,
+// isolating anchor_trajectory as the unit under test.
+TEST(DP, AnchoringKeepsIndependentAnimationsCommensurable)
+{
+    Trajectory a;
+    a.time = {0.0f, 1.0f};
+    a.angle[0] = {glm::radians(170.0f), glm::radians(185.0f)};   // crosses 180 upward
+
+    Trajectory b;
+    b.time = {0.0f, 1.0f};
+    b.angle[0] = {glm::radians(-170.0f), glm::radians(-185.0f)}; // same physical range,
+                                                                  // read from the other
+                                                                  // side of the wrap
+
+    const float zero_ref[3] = {0.0f, 0.0f, 0.0f};
+    anchor_trajectory(a, zero_ref);
+
+    // Anchor b against a's post-anchoring per-axis midpoint, the running
+    // reference a caller would carry forward when unioning ranges across
+    // animations of the same joint. Axes 1 and 2 are unused (empty) in this
+    // synthetic Trajectory, so only reference[0] is meaningful.
+    float a_lo = *std::min_element(a.angle[0].begin(), a.angle[0].end());
+    float a_hi = *std::max_element(a.angle[0].begin(), a.angle[0].end());
+    const float a_ref[3] = {0.5f * (a_lo + a_hi), 0.0f, 0.0f};
+    anchor_trajectory(b, a_ref);
+
+    float lo = std::min(*std::min_element(a.angle[0].begin(), a.angle[0].end()),
+                        *std::min_element(b.angle[0].begin(), b.angle[0].end()));
+    float hi = std::max(*std::max_element(a.angle[0].begin(), a.angle[0].end()),
+                        *std::max_element(b.angle[0].begin(), b.angle[0].end()));
+
+    // True excursion is 170..190 degrees, i.e. 20 degrees wide.
+    EXPECT_LT(glm::degrees(hi - lo), 40.0f);
+}
+
+// With an all-zero reference, anchor_trajectory must reproduce the
+// documented (-pi, pi] normalisation of a single trajectory's own midpoint:
+// this is the case Tasks 8, 10 and 11 depend on being unchanged from the
+// single-animation behaviour.
+TEST(DP, ZeroReferenceNormalizesSingleTrajectoryIntoPrincipalRange)
+{
+    // 0 -> 400 degrees: a single monotonic sweep that crosses the +-180
+    // wrap boundary once, so resolve_branches's continuous unwrap keeps
+    // growing straight through it (verified directly: front/back land at
+    // exactly 0 and 400 degrees, not aliased), leaving a midpoint of 200
+    // degrees -- well outside (-pi, pi].
+    std::vector<glm::quat> rel;
+    std::vector<float> times;
+    for (int i = 0; i <= 20; ++i) {
+        float f = static_cast<float>(i) / 20.0f;
+        float deg = f * 400.0f;
+        times.push_back(i * 0.05f);
+        rel.push_back(glm::angleAxis(glm::radians(deg), glm::vec3(1, 0, 0)));
+    }
+    Trajectory t = resolve_branches(rel, times, tait_xyz());
+
+    const float zero_ref[3] = {0.0f, 0.0f, 0.0f};
+    anchor_trajectory(t, zero_ref);
+
+    float lo = *std::min_element(t.angle[0].begin(), t.angle[0].end());
+    float hi = *std::max_element(t.angle[0].begin(), t.angle[0].end());
+    float mid = 0.5f * (lo + hi);
+
+    // Midpoint (200 degrees) shifts by -2pi (360 degrees), landing at
+    // -160 degrees, squarely inside (-pi, pi].
+    EXPECT_NEAR(glm::degrees(mid), -160.0f, 1.0f);
+    EXPECT_GT(mid, -kPi);
+    EXPECT_LE(mid, kPi);
+}
+
+// Anchoring an already-anchored trajectory against the same reference must
+// be a no-op.
+TEST(DP, AnchoringIsIdempotent)
+{
+    // 0 -> 400 degrees, same construction as the zero-reference test above:
+    // the first anchor call must actually shift this trajectory by -2pi
+    // (its midpoint, 200 degrees, is well outside (-pi, pi]), so the "no
+    // change on the second call" assertion below cannot be satisfied
+    // vacuously by a no-op anchor_trajectory -- the first call is checked
+    // to have moved the data before the second call is checked to leave it
+    // alone.
+    std::vector<glm::quat> rel;
+    std::vector<float> times;
+    for (int i = 0; i <= 20; ++i) {
+        float f = static_cast<float>(i) / 20.0f;
+        float deg = f * 400.0f;
+        times.push_back(i * 0.05f);
+        rel.push_back(glm::angleAxis(glm::radians(deg), glm::vec3(1, 0, 0)));
+    }
+    Trajectory t = resolve_branches(rel, times, tait_xyz());
+    std::vector<float> before = t.angle[0];
+
+    const float zero_ref[3] = {0.0f, 0.0f, 0.0f};
+    anchor_trajectory(t, zero_ref);
+    std::vector<float> once = t.angle[0];
+
+    // The first call must have actually moved the data (rules out a no-op
+    // anchor_trajectory passing this test vacuously).
+    ASSERT_EQ(before.size(), once.size());
+    bool changed = false;
+    for (size_t i = 0; i < before.size(); ++i)
+        if (std::fabs(before[i] - once[i]) > 1e-3f) changed = true;
+    EXPECT_TRUE(changed);
+
+    anchor_trajectory(t, zero_ref);
+
+    ASSERT_EQ(once.size(), t.angle[0].size());
+    for (size_t i = 0; i < once.size(); ++i)
+        EXPECT_FLOAT_EQ(once[i], t.angle[0][i]) << "at " << i;
 }

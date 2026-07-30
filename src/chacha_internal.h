@@ -120,6 +120,17 @@ Trajectory resolve_branches(
     std::span<const float>     times,
     const Chart&               chart);
 
+// Shifts each axis by the multiple of 2pi that brings that axis's trajectory
+// midpoint closest to reference[axis]. Trajectories from different animations
+// of the same joint must be anchored against a common reference before their
+// ranges are unioned, or two animations that straddle the wrap boundary from
+// opposite sides will union to a spurious ~2pi span.
+// Pass an all-zero reference for the first animation of a joint; for each
+// subsequent animation pass the midpoint of the running unioned range. An
+// all-zero reference reproduces the (-pi, pi] normalisation of a lone
+// trajectory's own midpoint.
+void anchor_trajectory(Trajectory& t, const float reference[3]);
+
 } // namespace detail
 } // namespace ChaCha
 

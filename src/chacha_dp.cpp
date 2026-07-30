@@ -129,5 +129,23 @@ Trajectory resolve_branches(
     return out;
 }
 
+void anchor_trajectory(Trajectory& t, const float reference[3])
+{
+    for (int a = 0; a < 3; ++a) {
+        if (t.angle[a].empty()) continue;
+
+        float lo = t.angle[a][0], hi = t.angle[a][0];
+        for (float v : t.angle[a]) { lo = std::min(lo, v); hi = std::max(hi, v); }
+
+        // Midpoint rather than first sample: an animation may begin at an
+        // extreme of its range, and anchoring on that would push the
+        // opposite tail across the wrap boundary.
+        const float mid   = 0.5f * (lo + hi);
+        const float shift = kTwoPi * std::round((reference[a] - mid) / kTwoPi);
+        if (shift == 0.0f) continue;
+        for (float& v : t.angle[a]) v += shift;
+    }
+}
+
 } // namespace detail
 } // namespace ChaCha

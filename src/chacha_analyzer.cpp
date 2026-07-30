@@ -284,7 +284,20 @@ std::vector<Articulation> analyze(
     push_vec3(scale_by_node,       StageType::xScale,     /*is_scale=*/true);
 
     for (const auto& [node, motion] : rotation_by_node) {
-        Candidate c = select_candidate(motion, options);
+        // An artist-authored configuration animation is a direct
+        // specification: it declares the stage set, order and range, so
+        // no search is run. resolve_scan already narrowed the scan to
+        // "AGI "-prefixed animations when scanning all and any exist, but
+        // that only selects WHICH animations were scanned -- it says
+        // nothing about whether the motion actually has configuration
+        // shape (one axis at a time, returning to rest between phases).
+        // is_configuration_motion checks the shape itself, so an
+        // AGI-named animation that doesn't actually behave like one falls
+        // back to the search below rather than emitting a fabricated
+        // stage order.
+        Candidate c = is_configuration_motion(motion, options)
+                    ? solve_configuration(motion, options)
+                    : select_candidate(motion, options);
         if (!c.summary.valid) continue;
         candidate_by_node[node] = c;
         // Stages are an ORDERED SEQUENCE, not a set keyed by StageType: for

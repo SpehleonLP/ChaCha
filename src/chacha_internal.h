@@ -215,6 +215,26 @@ struct Candidate {
 // then smallest summed range, then best worst-case conditioning.
 Candidate select_candidate(const JointMotion& motion, const Options& options);
 
+// An artist-authored configuration animation exercises one axis at a time,
+// returning to rest between phases, in the order the stages should apply.
+// When true, that animation IS the specification: solve_configuration's
+// result should be used directly and select_candidate's 12-chart search
+// bypassed entirely, since with only one axis non-zero at a time the
+// stage order cannot be recovered any other way (the compositions
+// commute, so a chart search has no way to prefer one order over another).
+//
+// A phase may pass back through rest at its own midpoint (observed as two
+// same-axis sub-runs split by a rest crossing, not as two independent
+// phases); is_configuration_motion merges same-axis re-entries into the
+// existing phase rather than rejecting them. It rejects only genuine
+// ambiguity: two axes simultaneously active within one phase, or an axis
+// recurring after a DIFFERENT axis has intervened (true interleaving,
+// e.g. X, Z, X). See chacha_config.cpp and
+// Config.SameAxisReentryAfterMidPhaseRestCrossingMerges /
+// Config.RejectsGenuineInterleaving in chacha_config_test.cpp.
+bool      is_configuration_motion(const JointMotion& motion, const Options& options);
+Candidate solve_configuration(const JointMotion& motion, const Options& options);
+
 } // namespace detail
 } // namespace ChaCha
 

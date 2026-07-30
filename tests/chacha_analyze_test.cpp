@@ -496,3 +496,44 @@ TEST(Analyze, StageOrderIsTranslateThenScaleThenRotate)
     EXPECT_EQ(out[0].stages[1].type, StageType::xScale);
     EXPECT_EQ(out[0].stages[2].type, StageType::xRotate);
 }
+
+// resolve_scan's "AGI "-prefix narrowing selects WHICH animations are
+// scanned; it says nothing about whether the motion it finds actually has
+// configuration shape (one axis moving at a time, returning to rest
+// between phases). An animation named "AGI ..." whose rotation genuinely
+// mixes two axes at once must fall back to the ordinary chart search
+// rather than being forced through solve_configuration, which would
+// either reject it outright (dof 0, no articulation at all) or -- if the
+// shape-detection gate were ever loosened -- silently emit a fabricated
+// single-axis reading for motion that isn't single-axis. Two axes
+// simultaneously in motion the whole time is exactly what
+// is_configuration_motion's residual gate is supposed to catch and
+// reject, forcing select_candidate to run instead.
+TEST(Analyze, AgiNamedButNonConfigurationShapedMotionFallsBackToSearch)
+{
+    Rig rig;
+    std::vector<float> times;
+    std::vector<float> values;
+    for (int i = 0; i <= 40; ++i) {
+        const float f = static_cast<float>(i);
+        glm::quat q = glm::angleAxis(glm::radians(f), glm::vec3(1, 0, 0))
+                    * glm::angleAxis(glm::radians(f * 0.7f), glm::vec3(0, 0, 1));
+        values.insert(values.end(), {q.x, q.y, q.z, q.w});
+        times.push_back(static_cast<float>(i) / 30.0f);
+    }
+    AnimationChannel ch;
+    ch.node = 0; ch.animation = 0; ch.property = Property::Rotation;
+    ch.times = times; ch.values = values;
+
+    std::vector<AnimationChannel> chans{ch};
+    std::vector<Animation> anims{Animation{"AGI x-z sweep"}};
+
+    auto out = analyze(chans, anims, rig.skeleton());
+    // The chart search finds a real decomposition (at minimum a 2-axis
+    // candidate); a locked/empty result here would mean the motion was
+    // wrongly forced through the configuration path and rejected instead
+    // of falling back.
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_FALSE(out[0].stages.empty());
+    EXPECT_GE(out[0].dof_count, 2);
+}

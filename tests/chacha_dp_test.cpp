@@ -174,24 +174,140 @@ TEST(DP, SingleFramePassesThroughBranchZeroUnchanged)
     EXPECT_FLOAT_EQ(t.worst_conditioning, chart_conditioning(expected, c));
 }
 
-// Two animations of one joint that straddle +-180 degrees from opposite sides
-// must anchor into a common frame, or their union spans a spurious ~360 degrees.
+// resolve_branches has a second, independent ambiguity from the one
+// anchor_trajectory fixes: alternate_branch is (a0+pi, pi-a1, a2+pi) for
+// Tait-Bryan charts (and (a0+pi, -a1, a2+pi) for proper-Euler charts), and
+// the Viterbi cost only ever sums *consecutive* differences, so those
+// constant +-pi offsets cancel exactly on axes 0 and 2, and negating axis 1
+// about pi leaves its square unchanged. That makes the whole-path cost of
+// staying entirely on solve_euler's principal branch an exact tie (up to
+// float rounding) with staying entirely on its alternate_branch twin, for
+// every input on every chart -- not just pure single-axis rotations. Left
+// unresolved, which family resolve_branches returns is decided by float
+// rounding noise, and a joint at rest can be reported at (180,180,180)
+// instead of (0,0,0) -- reconstructs fine, but is wrong Stage output before
+// any cross-animation union even happens.
 //
-// This builds the two Trajectory objects directly rather than routing them
-// through resolve_branches. resolve_branches's Viterbi resolves a *second*,
-// independent ambiguity for a pure single-axis rotation: the whole-path cost
-// of staying on solve_euler's principal branch is exactly tied (up to float
-// rounding) with the whole-path cost of staying on its chart-flip alternate
-// (alternate_branch is an exact isometry of the squared-step metric, constant
-// offsets cancel in every consecutive difference) -- verified directly: for
-// this test's own two sweeps computed by hand, resolve_branches picked
-// opposite chart-flip families for the two animations (one landed on
-// (angle0, 0, 0), the other on (angle0, 180, 180)), a ~180 degree family
-// mismatch that no multiple-of-2pi shift on axis 0 can repair. That is a
-// resolve_branches/chart concern (a discrete branch-labelling ambiguity),
-// not the continuous 2pi wrap-boundary ambiguity anchor_trajectory exists to
-// fix, so it is tested here by constructing the Trajectory inputs directly,
-// isolating anchor_trajectory as the unit under test.
+// The fix seeds the t==0 Viterbi cost with each branch's squared distance
+// from the rest pose (see the seed loop in resolve_branches), so the
+// near-rest family wins decisively. This test asserts that directly: a
+// small sweep about a single axis must resolve with axes 1 and 2 near zero,
+// not near +-180. It fails against the unpatched resolve_branches (verified:
+// unpatched, this specific sweep landed on angle[1]==180, angle[2]==180).
+// Verified directly which sweep to use here: the tie is decided by float
+// rounding order, and it is NOT the same winner for every sweep. A -20 -> 20
+// degree sweep happens to land on the near-rest family even unpatched (a
+// false positive for this regression test, caught by running it against the
+// unpatched code before trusting it); a 0 -> 30 degree sweep reliably lands
+// on the far family (180, 180) unpatched, so that is the sweep used here.
+TEST(DP, ResolvesToNearRestFamilyNotFarFamily)
+{
+    std::vector<glm::quat> rel;
+    std::vector<float> times;
+    for (int i = 0; i <= 20; ++i) {
+        float f = static_cast<float>(i) / 20.0f;
+        float deg = 0.0f + f * 30.0f;   // 0 -> 30 degrees about X
+        times.push_back(i * 0.05f);
+        rel.push_back(glm::angleAxis(glm::radians(deg), glm::vec3(1, 0, 0)));
+    }
+    Trajectory t = resolve_branches(rel, times, tait_xyz());
+
+    for (size_t i = 0; i < t.angle[1].size(); ++i) {
+        EXPECT_LT(std::fabs(glm::degrees(t.angle[1][i])), 90.0f) << "at " << i;
+        EXPECT_LT(std::fabs(glm::degrees(t.angle[2][i])), 90.0f) << "at " << i;
+    }
+}
+
+// The scenario anchor_trajectory exists for, exercised end to end: two
+// independent animations of one joint, each pushed through resolve_branches
+// (not constructed by hand), then anchored against a running reference
+// before their ranges are unioned. This is the only executable coverage of
+// the failure mode Tasks 8, 10 and 11 depend on -- without it the suite can
+// stay green while that integration path is broken (as it was: before the
+// resolve_branches seed fix, this exact test asserted a union under 40
+// degrees and got 190; after the fix it gets 20, matching the true
+// 170..190 degree excursion).
+TEST(DP, AnchoringKeepsIndependentAnimationsCommensurable_ThroughResolveBranches)
+{
+    auto build = [](float from_deg, float to_deg) {
+        std::vector<glm::quat> rel; std::vector<float> times;
+        for (int i = 0; i <= 20; ++i) {
+            float f = static_cast<float>(i) / 20.0f;
+            float deg = from_deg + f * (to_deg - from_deg);
+            times.push_back(i * 0.05f);
+            rel.push_back(glm::angleAxis(glm::radians(deg), glm::vec3(1, 0, 0)));
+        }
+        return std::make_pair(rel, times);
+    };
+
+    auto [ra, ta] = build(170.0f, 185.0f);   // crosses 180 upward
+    auto [rb, tb] = build(190.0f, 175.0f);   // crosses 180 downward
+
+    Trajectory a = resolve_branches(ra, ta, tait_xyz());
+    Trajectory b = resolve_branches(rb, tb, tait_xyz());
+
+    const float zero_ref[3] = {0.0f, 0.0f, 0.0f};
+    anchor_trajectory(a, zero_ref);
+
+    float a_lo = *std::min_element(a.angle[0].begin(), a.angle[0].end());
+    float a_hi = *std::max_element(a.angle[0].begin(), a.angle[0].end());
+    const float a_ref[3] = {0.5f * (a_lo + a_hi), 0.0f, 0.0f};
+    anchor_trajectory(b, a_ref);
+
+    float lo = std::min(*std::min_element(a.angle[0].begin(), a.angle[0].end()),
+                        *std::min_element(b.angle[0].begin(), b.angle[0].end()));
+    float hi = std::max(*std::max_element(a.angle[0].begin(), a.angle[0].end()),
+                        *std::max_element(b.angle[0].begin(), b.angle[0].end()));
+
+    // True excursion is 170..190 degrees, i.e. 20 degrees wide.
+    EXPECT_LT(glm::degrees(hi - lo), 40.0f);
+}
+
+// A more direct cross-animation range check: two sweeps of one joint,
+// 0 -> 30 and -20 -> 20 degrees, pushed through resolve_branches and
+// anchored against a running reference. The true excursion is -20..30
+// degrees (50 degrees wide); a family or wrap-boundary mismatch between the
+// two independently-resolved trajectories would corrupt this union.
+TEST(DP, CrossAnimationRangeUnionMatchesTrueExcursion)
+{
+    auto build = [](float from_deg, float to_deg) {
+        std::vector<glm::quat> rel; std::vector<float> times;
+        for (int i = 0; i <= 20; ++i) {
+            float f = static_cast<float>(i) / 20.0f;
+            float deg = from_deg + f * (to_deg - from_deg);
+            times.push_back(i * 0.05f);
+            rel.push_back(glm::angleAxis(glm::radians(deg), glm::vec3(1, 0, 0)));
+        }
+        return std::make_pair(rel, times);
+    };
+
+    auto [rc, tc] = build(0.0f, 30.0f);
+    auto [rd, td] = build(-20.0f, 20.0f);
+
+    Trajectory c = resolve_branches(rc, tc, tait_xyz());
+    Trajectory d = resolve_branches(rd, td, tait_xyz());
+
+    const float zero_ref[3] = {0.0f, 0.0f, 0.0f};
+    anchor_trajectory(c, zero_ref);
+
+    float c_lo = *std::min_element(c.angle[0].begin(), c.angle[0].end());
+    float c_hi = *std::max_element(c.angle[0].begin(), c.angle[0].end());
+    const float c_ref[3] = {0.5f * (c_lo + c_hi), 0.0f, 0.0f};
+    anchor_trajectory(d, c_ref);
+
+    float lo = std::min(*std::min_element(c.angle[0].begin(), c.angle[0].end()),
+                        *std::min_element(d.angle[0].begin(), d.angle[0].end()));
+    float hi = std::max(*std::max_element(c.angle[0].begin(), c.angle[0].end()),
+                        *std::max_element(d.angle[0].begin(), d.angle[0].end()));
+
+    EXPECT_NEAR(glm::degrees(hi - lo), 50.0f, 1.0f);
+}
+
+// Unit-level coverage of anchor_trajectory itself, independent of
+// resolve_branches: two synthetic Trajectory objects built directly with
+// the exact raw ranges the cross-animation scenario above depends on
+// (one on each side of the +-180 wrap), so this test's pass/fail is
+// determined solely by anchor_trajectory's own 2pi-shift logic.
 TEST(DP, AnchoringKeepsIndependentAnimationsCommensurable)
 {
     Trajectory a;
@@ -299,4 +415,39 @@ TEST(DP, AnchoringIsIdempotent)
     ASSERT_EQ(once.size(), t.angle[0].size());
     for (size_t i = 0; i < once.size(); ++i)
         EXPECT_FLOAT_EQ(once[i], t.angle[0][i]) << "at " << i;
+}
+
+// anchor_trajectory loops over all three axes independently; the tests
+// above only ever populate axis 0. This covers more than one axis carrying
+// a non-trivial trajectory in the same call, with different reference
+// values and different required shifts per axis, so a bug that only
+// touched axis 0 (or that shared state across axes) would be caught.
+TEST(DP, AnchorsMultipleAxesIndependently)
+{
+    Trajectory t;
+    t.time = {0.0f, 1.0f};
+    // Axis 0: same as the direct-construction commensurability test above --
+    // raw range -185..-170 degrees, needs +360 to align near +177.5.
+    t.angle[0] = {glm::radians(-170.0f), glm::radians(-185.0f)};
+    // Axis 1: already well inside (-pi, pi], needs no shift at all.
+    t.angle[1] = {glm::radians(10.0f), glm::radians(20.0f)};
+    // Axis 2: sits just past pi, needs a single -2pi shift with a non-zero
+    // reference, distinct from axis 0's +2pi shift, to prove the two axes
+    // are not accidentally sharing one shift value.
+    t.angle[2] = {glm::radians(185.0f), glm::radians(195.0f)};
+
+    const float reference[3] = {glm::radians(177.5f), glm::radians(0.0f), glm::radians(-175.0f)};
+    anchor_trajectory(t, reference);
+
+    // Axis 0 shifted by +360 degrees.
+    EXPECT_NEAR(glm::degrees(t.angle[0][0]), 190.0f, 1e-2f);
+    EXPECT_NEAR(glm::degrees(t.angle[0][1]), 175.0f, 1e-2f);
+
+    // Axis 1 unshifted.
+    EXPECT_NEAR(glm::degrees(t.angle[1][0]), 10.0f, 1e-2f);
+    EXPECT_NEAR(glm::degrees(t.angle[1][1]), 20.0f, 1e-2f);
+
+    // Axis 2 shifted by -360 degrees.
+    EXPECT_NEAR(glm::degrees(t.angle[2][0]), -175.0f, 1e-2f);
+    EXPECT_NEAR(glm::degrees(t.angle[2][1]), -165.0f, 1e-2f);
 }

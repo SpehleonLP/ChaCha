@@ -72,8 +72,40 @@ Trajectory resolve_branches(
 
     reachable[0] = true;
     reachable[1] = true;
-    cost[0] = 0.0f;
-    cost[1] = 0.0f;
+
+    // Seed t==0 with each branch's squared distance from the rest pose
+    // (all-zero angles), scaled by 1e-3. Without this, the whole-path cost
+    // of staying entirely on solve_euler's principal branch is an EXACT tie
+    // (up to float rounding) with staying entirely on its alternate_branch
+    // twin, for every input on every chart: alternate_branch is
+    // (a0+pi, pi-a1, a2+pi) for Tait-Bryan charts and (a0+pi, -a1, a2+pi) for
+    // proper-Euler charts, and the Viterbi cost only ever sums consecutive
+    // differences, so the constant +-pi offsets cancel exactly on axes 0 and
+    // 2, and negating axis 1 about pi leaves its square unchanged. That tie
+    // is then broken only by float rounding noise (~1e-5 scale), so which
+    // "family" resolve_branches returns for a given input is otherwise
+    // arbitrary. Seeding with distance-from-rest breaks the tie in favor of
+    // the physically meaningful reading: a joint at rest should decompose
+    // near (0,0,0), not near (180,180,180).
+    //
+    // The 1e-3 scale is load-bearing: do not drop it or round it to a
+    // "nicer" constant. An unscaled seed can reach 3*pi^2 (~29.6, when a
+    // frame's principal-branch reading sits near the far side of the
+    // circle on all three axes), which exceeds the ~20 transition cost of a
+    // genuine mid-path branch switch (see DP.SwitchesBranchAcrossChartSingularity)
+    // and would suppress that legitimate switch. At 1e-3 the seed is
+    // decisive against the ~1e-5 float-rounding noise that would otherwise
+    // decide the tie, while staying negligible against any real transition
+    // cost, so it only ever breaks exact (or near-exact) ties and never
+    // overrides a genuine mid-path switch.
+    for (int b = 0; b < 2; ++b) {
+        float s = 0.0f;
+        for (int a = 0; a < 3; ++a) {
+            float w = principal_difference(cand[b].angle[a], 0.0f);
+            s += w * w;
+        }
+        cost[b] = 1e-3f * s;
+    }
 
     for (int t = 1; t < n; ++t) {
         for (int b = 0; b < 2; ++b) {

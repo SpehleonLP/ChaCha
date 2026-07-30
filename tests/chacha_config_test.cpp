@@ -320,3 +320,136 @@ TEST(Config, CrossAnimationAxisRecurrenceIsNotInterleaving)
     // Z's range unions both animations' sweeps: max(6, 7) = 7 degrees.
     EXPECT_NEAR(glm::degrees(c.summary.max_value[0]), 7.0f, 1.0f);
 }
+
+namespace {
+// A monotone linear ramp 0 -> peak, followed by a single frame that snaps
+// directly back to rest (as opposed to single_axis_sweep's gradual
+// half-sine return). Exercises close_run's rest-anchor path from a large,
+// actively-growing prev_angle rather than one that has already eased back
+// toward 0 -- exactly the case the closing anchor's own derivation must
+// get right independent of how the joint got to rest.
+JointMotion snap_back_sweep(float peak_deg, const glm::vec3& axis, int steps = 60)
+{
+    std::vector<glm::quat> rel;
+    std::vector<float> times;
+    for (int i = 0; i <= steps; ++i) {
+        const float f   = static_cast<float>(i) / static_cast<float>(steps);
+        const float deg = peak_deg * f;
+        rel.push_back(glm::angleAxis(glm::radians(deg), axis));
+        times.push_back(static_cast<float>(i) / 60.0f);
+    }
+    rel.push_back(glm::quat(1, 0, 0, 0));                       // snaps straight back to rest
+    times.push_back(static_cast<float>(steps + 1) / 60.0f);
+    JointMotion m;
+    m.rel_by_animation.push_back(std::move(rel));
+    m.times_by_animation.push_back(std::move(times));
+    return m;
+}
+} // namespace
+
+// close_run's rest-anchor sample must close at the SAME (unwrapped) value
+// the run began at -- 0 -- never a value derived from the last active
+// sample. An earlier version derived the closing anchor via
+// principal_difference(0, prev_angle), which steps FORWARD to the nearest
+// multiple of 2*pi rather than back to the true rest value whenever
+// prev_angle exceeds 180 degrees: a peak-200 sweep that snaps straight
+// back to rest reported [0, 360] (a fabricated extra half-turn) instead
+// of [0, 200]. Gradual returns (see LargeSweepPast180DegreesIsUnwrappedNotWrapped)
+// happen not to hit this, since they ease back through every intermediate
+// angle and the true rest-adjacent sample is already near 0 before the
+// epsilon check fires; a snap/step return has no such intermediate
+// samples, so this is the case that actually exercises the closing
+// anchor's own derivation.
+TEST(Config, ClosingRestAnchorDoesNotFabricateAFullTurnOnSnapBack)
+{
+    Candidate c200 = solve_configuration(snap_back_sweep(200.0f, glm::vec3(1, 0, 0)), Options{});
+    ASSERT_EQ(c200.dof, 1);
+    EXPECT_NEAR(glm::degrees(c200.summary.min_value[0]), 0.0f, 2.0f);
+    EXPECT_NEAR(glm::degrees(c200.summary.max_value[0]), 200.0f, 2.0f);
+
+    Candidate c260 = solve_configuration(snap_back_sweep(260.0f, glm::vec3(1, 0, 0)), Options{});
+    ASSERT_EQ(c260.dof, 1);
+    EXPECT_NEAR(glm::degrees(c260.summary.min_value[0]), 0.0f, 2.0f);
+    EXPECT_NEAR(glm::degrees(c260.summary.max_value[0]), 260.0f, 2.0f);
+}
+
+namespace {
+// A clean, single-axis Y sweep -- unambiguously configuration-shaped on
+// its own.
+JointMotion clean_y_sweep()
+{
+    std::vector<glm::quat> rel; std::vector<float> times;
+    for (int i = 0; i <= 20; ++i) {
+        float f = static_cast<float>(i) / 20.0f;
+        float deg = 6.0f * std::sin(f * 3.14159265f);
+        rel.push_back(glm::angleAxis(glm::radians(deg), glm::vec3(0, 1, 0)));
+        times.push_back(i / 24.0f);
+    }
+    JointMotion m;
+    m.rel_by_animation.push_back(std::move(rel));
+    m.times_by_animation.push_back(std::move(times));
+    return m;
+}
+
+// A clip with two axes genuinely simultaneous throughout -- fails
+// accumulate_animation's single-axis-fit gate on essentially every active
+// frame.
+std::vector<glm::quat> bad_simultaneous_x_z_frames(std::vector<float>& times)
+{
+    std::vector<glm::quat> rel;
+    for (int i = 0; i <= 20; ++i) {
+        const float f = static_cast<float>(i);
+        rel.push_back(glm::angleAxis(glm::radians(f), glm::vec3(1, 0, 0))
+                    * glm::angleAxis(glm::radians(f), glm::vec3(0, 0, 1)));
+        times.push_back(i / 24.0f);
+    }
+    return rel;
+}
+} // namespace
+
+// A joint driven by two AGI clips where only one is actually
+// configuration-shaped (the scorpion model's real "AGI Configuration" /
+// "AGI Configuration.001" pair is exactly this scenario when one clip
+// isn't a clean single-axis sweep) must still recover order and range
+// from the clip that IS clean -- the bad clip contributes nothing, but
+// does not veto the whole joint and force a fall-back to the chart
+// search, which would lose the authored order for the one axis that WAS
+// deliberately specified. Tested both orderings, since a veto-style bug
+// (return false on the first accumulate_animation failure) would behave
+// identically regardless of which position the bad clip sits in.
+TEST(Config, InvalidAnimationIsSkippedNotVetoedBadClipFirst)
+{
+    JointMotion m;
+    std::vector<float> bad_times;
+    m.rel_by_animation.push_back(bad_simultaneous_x_z_frames(bad_times));
+    m.times_by_animation.push_back(bad_times);
+
+    JointMotion good = clean_y_sweep();
+    m.rel_by_animation.push_back(good.rel_by_animation[0]);
+    m.times_by_animation.push_back(good.times_by_animation[0]);
+
+    EXPECT_TRUE(is_configuration_motion(m, Options{}));
+    Candidate c = solve_configuration(m, Options{});
+    ASSERT_EQ(c.dof, 1);
+    EXPECT_EQ(c.stage[0], StageType::yRotate);
+    EXPECT_NEAR(glm::degrees(c.summary.max_value[0]), 6.0f, 1.0f);
+}
+
+TEST(Config, InvalidAnimationIsSkippedNotVetoedBadClipSecond)
+{
+    JointMotion m;
+
+    JointMotion good = clean_y_sweep();
+    m.rel_by_animation.push_back(good.rel_by_animation[0]);
+    m.times_by_animation.push_back(good.times_by_animation[0]);
+
+    std::vector<float> bad_times;
+    m.rel_by_animation.push_back(bad_simultaneous_x_z_frames(bad_times));
+    m.times_by_animation.push_back(bad_times);
+
+    EXPECT_TRUE(is_configuration_motion(m, Options{}));
+    Candidate c = solve_configuration(m, Options{});
+    ASSERT_EQ(c.dof, 1);
+    EXPECT_EQ(c.stage[0], StageType::yRotate);
+    EXPECT_NEAR(glm::degrees(c.summary.max_value[0]), 6.0f, 1.0f);
+}

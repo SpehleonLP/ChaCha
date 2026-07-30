@@ -62,11 +62,32 @@ bool starts_with_agi(std::string_view name)
 
 } // namespace
 
+// `agi_narrowed` is set to true exactly when this call narrowed the scan
+// to "AGI "-prefixed animations (no explicit scan given, narrowing
+// requested via options.prioritize_rom_animations, and at least one such
+// animation exists) -- i.e. exactly the "artist-authored spec wins
+// outright" branch below. Reported directly from the one place that
+// branch is decided, rather than recomputed independently elsewhere,
+// so the two cannot silently drift apart.
+//
+// This flag is the gate the configuration fast path (is_configuration_motion
+// / solve_configuration) requires in addition to shape detection: shape
+// alone is not sufficient evidence that an animation is an artist's
+// deliberate constraint specification -- an ordinary walk cycle can
+// happen to move one axis at a time too (see
+// Analyze.OrdinaryAnimationWithConfigurationShapeDoesNotFastPathWithoutAgiNarrowing
+// in chacha_analyze_test.cpp for a directly observed case). Only when the
+// caller's own "AGI " narrowing contract is actually in effect does shape
+// additionally get checked to confirm the motion really behaves like a
+// specification, and only then does the fast path fire.
 std::vector<int> resolve_scan(
     std::span<const Animation> animations,
     std::span<const int>       scan,
-    const Options&             options)
+    const Options&             options,
+    bool&                      agi_narrowed)
 {
+    agi_narrowed = false;
+
     std::vector<int> out;
     if (!scan.empty()) {                       // explicit request is honoured verbatim
         out.assign(scan.begin(), scan.end());
@@ -76,40 +97,14 @@ std::vector<int> resolve_scan(
     if (options.prioritize_rom_animations) {
         for (int i = 0; i < static_cast<int>(animations.size()); ++i)
             if (starts_with_agi(animations[i].name)) out.push_back(i);
-        if (!out.empty()) return out;          // artist-authored spec wins outright
+        if (!out.empty()) {                    // artist-authored spec wins outright
+            agi_narrowed = true;
+            return out;
+        }
     }
 
     for (int i = 0; i < static_cast<int>(animations.size()); ++i) out.push_back(i);
     return out;
-}
-
-// True exactly when resolve_scan (above) narrowed the scan to "AGI
-// "-prefixed animations because the caller passed no explicit scan, asked
-// for the narrowing (options.prioritize_rom_animations), and at least one
-// such animation exists -- i.e. exactly resolve_scan's own "artist-authored
-// spec wins outright" branch. Recomputes the same condition rather than
-// having resolve_scan report it via an out-parameter, since resolve_scan is
-// used standalone elsewhere; this keeps that signature untouched.
-//
-// This is the gate the configuration fast path (is_configuration_motion /
-// solve_configuration) requires in addition to shape detection: shape
-// alone is not sufficient evidence that an animation is an artist's
-// deliberate constraint specification -- an ordinary walk cycle can
-// happen to move one axis at a time too (see
-// Analyze.OrdinaryAnimationWithConfigurationShapeDoesNotFastPathWithoutAgiNarrowing
-// in chacha_analyze_test.cpp for a directly observed case). Only when the
-// caller's own "AGI " narrowing contract is actually in effect does shape
-// additionally get checked to confirm the motion really behaves like a
-// specification, and only then does the fast path fire.
-bool scan_is_agi_narrowed(
-    std::span<const Animation> animations,
-    std::span<const int>       scan,
-    const Options&             options)
-{
-    if (!scan.empty() || !options.prioritize_rom_animations) return false;
-    for (const auto& a : animations)
-        if (starts_with_agi(a.name)) return true;
-    return false;
 }
 
 } // namespace detail
@@ -145,8 +140,8 @@ std::vector<Articulation> analyze(
         return {};
     }
 
-    const std::vector<int> scanned          = resolve_scan(animations, scan, options);
-    const bool             agi_narrowed_scan = scan_is_agi_narrowed(animations, scan, options);
+    bool                    agi_narrowed_scan = false;
+    const std::vector<int>  scanned           = resolve_scan(animations, scan, options, agi_narrowed_scan);
     std::vector<bool> in_scan(animations.size(), false);
     for (int a : scanned)
         if (a >= 0 && a < static_cast<int>(animations.size())) in_scan[a] = true;

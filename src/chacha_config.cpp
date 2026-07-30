@@ -148,19 +148,23 @@ bool accumulate_animation(
 
         if (total < options.rotation_threshold_rad) {
             if (run.active) {
-                // Anchor the end of the sweep at exactly 0 too. Unwrapped
-                // through the same principal_difference step as every
-                // other sample (rather than a hard-coded 0.0f) so a
-                // large-angle sweep's endpoint stays consistent with the
-                // continuously unwrapped trajectory that led up to it,
-                // instead of snapping back into (-pi, pi] at the last
-                // instant.
-                const float raw = 0.0f;   // the rest sample itself is ~0 on any axis
-                const float ang = run.have_prev
-                                ? run.prev_angle + principal_difference(raw, run.prev_angle)
-                                : raw;
+                // Anchor the end of the sweep at exactly 0 -- the SAME
+                // value the run began at (see the anchor pushed when the
+                // run opened, below), not a value derived from the last
+                // active sample via principal_difference. The joint
+                // returned to the pose it started from; nothing in the
+                // data says it kept turning past that pose and wrapped
+                // around to it from the other side. Deriving the closing
+                // value from prev_angle instead (an earlier version of
+                // this code) is actively wrong for a run whose last active
+                // sample exceeds 180 degrees: principal_difference(0,
+                // prev_angle) steps FORWARD to the nearest multiple of
+                // 2*pi (e.g. 360 degrees for a ~200-degree prev_angle)
+                // rather than back to the true 0, fabricating a full extra
+                // turn. See
+                // Config.ClosingRestAnchorDoesNotFabricateAFullTurnOnSnapBack.
                 run.times.push_back(times[i]);
-                run.angles.push_back(ang);
+                run.angles.push_back(0.0f);
             }
             if (!close_run(run, order, options)) return false;
             have_rest = true;
@@ -241,20 +245,35 @@ bool accumulate_animation(
 // actually authored.
 //
 // Instead: each animation is validated independently (its own frames must
-// still form clean single-axis phases, or the whole joint is rejected --
-// same rule as before, just not spanning animation boundaries). The FIRST
-// animation that is both valid and non-empty (i.e. the joint actually
-// moves in it) supplies the authoritative stage order. Every other valid
-// animation's phases are folded in by axis identity: a shared axis has its
-// range/velocity/acceleration unioned into the first's entry (via the same
-// union_into used everywhere else in this pipeline), and an axis the first
-// animation never exercised is appended after the authoritative order
-// (new information, not a contradiction of it). If two animations
-// disagree about a shared axis's ORDER, the first animation's order wins
-// outright and this is not treated as an error -- only a genuine
-// single-axis-fit violation or intra-animation interleaving rejects the
-// whole joint.
-bool extract_phases(const JointMotion& motion, const Options& options,
+// still form clean single-axis phases, or THAT ANIMATION is skipped -- it
+// is not a veto over the whole joint; see below). The FIRST animation
+// that is valid AND non-empty (i.e. the joint actually moves in it, and
+// that motion has configuration shape) supplies the authoritative stage
+// order. Every other valid animation's phases are folded in by axis
+// identity: a shared axis has its range/velocity/acceleration unioned
+// into the first's entry (via the same union_into used everywhere else in
+// this pipeline), and an axis the first animation never exercised is
+// appended after the authoritative order (new information, not a
+// contradiction of it). If two animations disagree about a shared axis's
+// ORDER, the first (valid) animation's order wins outright and this is
+// not treated as an error.
+//
+// An animation that FAILS shape validation (accumulate_animation returns
+// false: genuine simultaneous multi-axis motion, or an axis interrupted
+// mid-phase without a return to rest) contributes nothing and is simply
+// skipped, rather than rejecting the whole joint. A joint driven by two
+// AGI clips where only one is actually configuration-shaped (e.g. the
+// scorpion model's "AGI Configuration" / "AGI Configuration.001" pair,
+// where such a split is a real, not hypothetical, authoring pattern) must
+// still recover its order and range from the clip that IS clean, rather
+// than having one non-conforming clip silently discard the artist's
+// authored order for the whole joint and fall back to the chart search
+// (which still produces AN articulation, just not in the authored order --
+// the one thing this whole path exists to preserve). If every animation
+// fails or is empty, `order` stays empty and the caller's
+// `order.empty()` check reports "not configuration motion" exactly as
+// before.
+void extract_phases(const JointMotion& motion, const Options& options,
                      std::vector<AxisPhase>& order)
 {
     order.clear();
@@ -265,7 +284,7 @@ bool extract_phases(const JointMotion& motion, const Options& options,
         if (!accumulate_animation(motion.rel_by_animation[ai],
                                    motion.times_by_animation[ai],
                                    options, local)) {
-            return false;
+            continue;   // this clip isn't configuration-shaped; contributes nothing
         }
         if (local.empty()) continue;   // this clip is locked; contributes nothing
 
@@ -282,8 +301,6 @@ bool extract_phases(const JointMotion& motion, const Options& options,
             else                   union_into(it->summary, p.summary);  // shared axis: union range
         }
     }
-
-    return true;
 }
 
 } // namespace
@@ -293,7 +310,7 @@ bool is_configuration_motion(const JointMotion& motion, const Options& options)
     if (motion.rel_by_animation.empty()) return false;
 
     std::vector<AxisPhase> order;
-    if (!extract_phases(motion, options, order)) return false;
+    extract_phases(motion, options, order);
     return !order.empty();
 }
 
@@ -302,7 +319,8 @@ Candidate solve_configuration(const JointMotion& motion, const Options& options)
     Candidate c;
 
     std::vector<AxisPhase> order;
-    if (!extract_phases(motion, options, order) || order.empty()) {
+    extract_phases(motion, options, order);
+    if (order.empty()) {
         // Locked joint: no phases observed anywhere. Set the same "not
         // measured" sentinel the populated branch below uses, rather than
         // leaving CandidateSummary's default 1.0f ("perfectly

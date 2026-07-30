@@ -39,10 +39,6 @@ std::vector<DofTrack> extract_dof_tracks(
     const Skeleton& skeleton
 );
 
-std::vector<RawStage> segment_and_merge(
-    std::span<const DofTrack> tracks_for_joint
-);
-
 std::vector<Stage> filter_stages(
     std::span<const RawStage> raw_stages,
     const Options& options
@@ -145,6 +141,24 @@ Trajectory resolve_branches(
 // all-zero reference reproduces the (-pi, pi] normalisation of a lone
 // trajectory's own midpoint.
 void anchor_trajectory(Trajectory& t, const float reference[3]);
+
+// A fixed-size summary of a resolved angle trajectory: observed min/max per
+// axis, plus velocity and acceleration recovered by resampling onto a
+// uniform time grid (so the derivative estimates are independent of the
+// original keyframe density). Unit-agnostic: used for rotation (radians),
+// translation (metres) and scale (unitless factor) trajectories alike.
+struct CandidateSummary {
+    bool  valid{false};
+    float min_value[3]{};
+    float max_value[3]{};
+    float max_velocity[3]{};
+    float max_acceleration[3]{};
+    float max_residual_rad{0.0f};
+    float worst_conditioning{1.0f};
+};
+
+CandidateSummary summarise(const Trajectory& t, float residual_rad, const Options& options);
+void union_into(CandidateSummary& dst, const CandidateSummary& src);
 
 } // namespace detail
 } // namespace ChaCha

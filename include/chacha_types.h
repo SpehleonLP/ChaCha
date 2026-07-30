@@ -49,6 +49,8 @@ struct Options {
     float translation_threshold_m{0.001f};
     float scale_threshold{0.01f};
     bool prioritize_rom_animations{true};
+    float resample_rate_hz{60.0f};
+    int derivative_window{5};
 };
 
 } // namespace ChaCha

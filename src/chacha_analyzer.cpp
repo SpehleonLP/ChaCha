@@ -349,61 +349,13 @@ std::vector<Articulation> analyze(
     const Skeleton& skeleton,
     const Options& options)
 {
-    auto all_tracks = detail::extract_dof_tracks(channels, skeleton);
-
-    std::map<int, std::vector<const detail::DofTrack*>> tracks_by_node;
-    for (const auto& track : all_tracks) {
-        tracks_by_node[track.node].push_back(&track);
-    }
-
-    std::vector<Articulation> result;
-    const int num_joints = static_cast<int>(skeleton.parents.size());
-
-    for (auto& [node, node_tracks] : tracks_by_node) {
-        if (node < 0 || node >= num_joints) continue;
-
-        std::vector<detail::DofTrack> joint_tracks;
-        joint_tracks.reserve(node_tracks.size());
-        for (const auto* tp : node_tracks) {
-            joint_tracks.push_back(*tp);
-        }
-
-        auto raw_stages = detail::segment_and_merge(
-            std::span<const detail::DofTrack>(joint_tracks));
-
-        auto stages = detail::filter_stages(
-            std::span<const detail::RawStage>(raw_stages), options);
-
-        if (!stages.empty()) {
-            // Collect rotation tracks for this joint
-            std::vector<detail::DofTrack> rot_tracks;
-            for (const auto& tr : joint_tracks) {
-                if (tr.type == StageType::xRotate ||
-                    tr.type == StageType::yRotate ||
-                    tr.type == StageType::zRotate) {
-                    rot_tracks.push_back(tr);
-                }
-            }
-
-            detail::optimize_stage_order(
-                stages, rot_tracks, channels, skeleton, node);
-
-            Articulation art;
-            art.node = node;
-            // Leave name empty — caller provides names from document context
-            art.stages = std::move(stages);
-            result.push_back(std::move(art));
-        }
-    }
-
-    std::sort(result.begin(), result.end(),
-        [](const Articulation& a, const Articulation& b) {
-            return a.node < b.node;
-        });
-
-    detail::infer_pointing_vectors(result, skeleton);
-
-    return result;
+    // TODO(Task 10): rebuild analyze() on top of resolve_branches/anchor_trajectory/
+    // summarise instead of the retired segment_and_merge pipeline. Stubbed to keep
+    // the tree building in the interim (Task 6).
+    (void)channels;
+    (void)skeleton;
+    (void)options;
+    return {};
 }
 
 } // namespace ChaCha

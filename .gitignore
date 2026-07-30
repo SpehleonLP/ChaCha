@@ -43,3 +43,6 @@
 # Build directories
 build/
 cmake-build-*/
+
+# Test models (large binaries, not distributed)
+testdata/

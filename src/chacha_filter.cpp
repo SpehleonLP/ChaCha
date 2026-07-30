@@ -1,4 +1,5 @@
 #include "chacha_internal.h"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -45,18 +46,16 @@ std::vector<Stage> filter_stages(
     result.reserve(raw_stages.size());
 
     for (const auto& raw : raw_stages) {
-        float range = raw.range();
-        float threshold = threshold_for_type(raw.type, options);
-
-        if (range < threshold) continue;
+        const float threshold = threshold_for_type(raw.type, options);
+        if (raw.range() < threshold) continue;
 
         Stage stage;
-        stage.type = raw.type;
-        stage.min_value = raw.min_value;
-        stage.max_value = raw.max_value;
-        stage.initial_value = raw.initial_value;
-        stage.max_velocity = raw.max_velocity;
-        stage.max_acceleration = raw.max_effort;
+        stage.type             = raw.type;
+        stage.min_value        = raw.min_value;
+        stage.max_value        = raw.max_value;
+        stage.initial_value    = std::clamp(raw.initial_value, raw.min_value, raw.max_value);
+        stage.max_velocity     = raw.max_velocity;
+        stage.max_acceleration = raw.max_acceleration;
         result.push_back(stage);
     }
 

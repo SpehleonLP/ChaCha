@@ -165,6 +165,32 @@ struct CandidateSummary {
 CandidateSummary summarise(const Trajectory& t, float residual_rad, const Options& options);
 void union_into(CandidateSummary& dst, const CandidateSummary& src);
 
+// Reduced-degree-of-freedom candidate solvers.
+//
+// solve_one_dof finds the angle `a` such that axis_quat(axis, a) is the
+// closest single-axis rotation to `q` (closed form: half-angle extracted
+// from q's axis/w components). q and -q represent the same rotation, so
+// the input is normalized to the w >= 0 representative before extracting
+// the half-angle; without that normalization the extracted angle can be
+// off by a multiple of 2pi depending on the arbitrary sign of the input
+// quaternion.
+float solve_one_dof(const glm::quat& q, int axis);
+
+// Angular distance (radians, via the acos(|dot|) metric) between q and the
+// single-axis rotation axis_quat(axis, angle). Large for motion that a
+// single axis cannot represent.
+float residual_one_dof(const glm::quat& q, int axis, float angle);
+
+// Gauss-Newton refinement of a 2-axis composition axis_quat(axis0, a0) *
+// axis_quat(axis1, a1) toward q, seeded from `seed`. Forward-difference
+// Jacobian, damped normal equations, at most 24 iterations.
+void solve_two_dof(const glm::quat& q, int axis0, int axis1,
+                    const float seed[2], float out[2]);
+
+// Angular distance (radians) between q and the 2-axis composition
+// axis_quat(axis0, a[0]) * axis_quat(axis1, a[1]).
+float residual_two_dof(const glm::quat& q, int axis0, int axis1, const float a[2]);
+
 } // namespace detail
 } // namespace ChaCha
 

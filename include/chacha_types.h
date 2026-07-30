@@ -51,6 +51,12 @@ struct Options {
     bool prioritize_rom_animations{true};
     float resample_rate_hz{60.0f};
     int derivative_window{5};
+    // Acceptance gate for reduced-DOF (1- or 2-axis) search candidates: a
+    // candidate is only admissible if its worst observed fit residual (see
+    // residual_one_dof/residual_two_dof) is at or below this bound.
+    // Full-rank (3-DOF) chart candidates always reconstruct exactly and are
+    // not subject to this gate.
+    float max_fit_residual_rad{0.02f};
 };
 
 } // namespace ChaCha

@@ -191,6 +191,34 @@ void solve_two_dof(const glm::quat& q, int axis0, int axis1,
 // axis_quat(axis0, a[0]) * axis_quat(axis1, a[1]).
 float residual_two_dof(const glm::quat& q, int axis0, int axis1, const float a[2]);
 
+// One joint's rest-pose-relative rotation across every animation that
+// touches it. Each inner vector of rel_by_animation/times_by_animation is
+// one animation's samples for this joint, in matching order.
+struct JointMotion {
+    std::vector<std::vector<glm::quat>> rel_by_animation;
+    std::vector<std::vector<float>>     times_by_animation;
+};
+
+// A candidate rotational decomposition for a joint: `dof` axes (1, 2 or 3),
+// each with its StageType and axis index in stage[]/axis[], plus the
+// CandidateSummary accumulated (unioned) across every animation in a
+// JointMotion. `proper` mirrors Chart::proper for dof == 3 candidates and
+// is meaningless otherwise.
+struct Candidate {
+    StageType        stage[3]{};
+    int              axis[3]{};
+    int              dof{0};
+    bool             proper{false};
+    CandidateSummary summary;
+};
+
+// Enumerates every candidate decomposition of a joint's motion (3 one-axis,
+// 6 ordered two-axis, 12 three-axis charts), solves and summarises each
+// against every animation in `motion`, and returns the best by a
+// lexicographic score: fewest DOF first (subject to a fit-residual gate),
+// then smallest summed range, then best worst-case conditioning.
+Candidate select_candidate(const JointMotion& motion, const Options& options);
+
 } // namespace detail
 } // namespace ChaCha
 

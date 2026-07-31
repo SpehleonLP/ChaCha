@@ -47,10 +47,20 @@ std::string sanitize_articulation_name(std::string_view raw, std::vector<std::st
 
 std::string stage_name_for(StageType type, int occurrence)
 {
-    // Invalid marks an unused Candidate slot (see chacha_internal.h) and must
-    // never reach emitted AGI output. Assert loudly in debug builds rather
-    // than silently formatting a plausible-looking "invalid"/"invalid2" name
-    // that would slip into a schema-conformant-looking but bogus stage.
+    // This documents a caller contract -- stage_name_for is only ever meant
+    // to be called on a Stage that has already survived the pipeline, and
+    // Invalid never should have -- it is NOT the mechanism that keeps
+    // StageType::Invalid out of emitted AGI output. This project's default
+    // configure (RelWithDebInfo, see CMakeLists.txt) sets -DNDEBUG, which
+    // compiles this assert out entirely, so in the build that actually
+    // ships this line does nothing at all. The real guarantee lives in the
+    // production pipeline: chacha_analyzer.cpp's stage-emission loop is
+    // bounded by Candidate::dof, and chacha_filter.cpp's
+    // threshold_for_type(Invalid) returns +infinity as a last-resort
+    // backstop even if a stray Invalid-typed RawStage got past that loop.
+    // See Analyze.NeverEmitsInvalidStageType and
+    // Filter.InvalidTypedRawStageIsDroppedRegardlessOfRange, which pin
+    // those two facts with tests rather than relying on this assert.
     assert(type != StageType::Invalid && "stage_name_for: StageType::Invalid must never be emitted");
 
     std::string name = stage_type_name(type);

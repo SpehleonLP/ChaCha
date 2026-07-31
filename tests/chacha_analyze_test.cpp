@@ -682,3 +682,107 @@ TEST(Analyze, MultipleAgiAnimationsUnionRangesWithFirstAnimationSettingOrder)
     EXPECT_EQ(out[0].stages[2].type, StageType::yRotate);
     EXPECT_NEAR(glm::degrees(out[0].stages[1].max_value), 15.0f, 1.0f);
 }
+
+// StageType::Invalid is the sentinel Candidate uses for a reduced-DOF
+// winner's unused trailing slots (see chacha_internal.h and Task 8). It
+// must never reach an emitted Stage: two things enforce that in
+// chacha_analyzer.cpp's stage-emission loop --
+//   (1) the loop itself only visits slots [0, dof), where dof is exactly
+//       how many of a Candidate's slots select_candidate/solve_configuration
+//       actually populated, so an unused slot is never even considered, and
+//   (2) even if a stray Invalid-typed slot were visited (defence in depth:
+//       `if (c.stage[s] == StageType::Invalid) continue;`, plus
+//       chacha_filter.cpp's threshold_for_type(Invalid) returning +inf as a
+//       last-resort backstop in filter_stages), it is dropped before
+//       reaching the returned Articulation.
+// This test pins the observable outcome -- no Invalid stage in analyze()'s
+// output -- across a 1-DOF, a 2-DOF and a 3-DOF winner, since reduced-DOF
+// Candidates are exactly the ones whose trailing slots genuinely hold
+// Invalid (a 3-DOF winner never has an unused slot at all).
+TEST(Analyze, NeverEmitsInvalidStageType)
+{
+    auto assert_no_invalid_stage = [](const std::vector<Articulation>& out) {
+        for (const auto& art : out)
+            for (const auto& stage : art.stages)
+                EXPECT_NE(stage.type, StageType::Invalid)
+                    << "node " << art.node << " emitted an Invalid-typed stage";
+    };
+
+    // 1-DOF winner: pure hinge about X.
+    {
+        Rig rig;
+        std::vector<float> times, values;
+        for (int i = 0; i <= 30; ++i) {
+            glm::quat q = glm::angleAxis(glm::radians(i * 2.0f), glm::vec3(1, 0, 0));
+            values.insert(values.end(), {q.x, q.y, q.z, q.w});
+            times.push_back(i / 30.0f);
+        }
+        AnimationChannel ch;
+        ch.node = 0; ch.animation = 0; ch.property = Property::Rotation;
+        ch.times = times; ch.values = values;
+        std::vector<AnimationChannel> chans{ch};
+        std::vector<Animation> anims{Animation{"hinge"}};
+
+        auto out = analyze(chans, anims, rig.skeleton());
+        ASSERT_EQ(out.size(), 1u);
+        ASSERT_EQ(out[0].dof_count, 1);
+        assert_no_invalid_stage(out);
+    }
+
+    // 2-DOF winner: two animations whose cross-animation anchoring pins the
+    // winner at exactly dof == 2 (same construction as
+    // Search.TwoDofCrossAnimationAnchorCollapsesOppositeSidesOfTheWrap).
+    {
+        Rig rig;
+        std::vector<float> times0, values0, times1, values1;
+        for (int i = 0; i <= 10; ++i) {
+            glm::quat qa = glm::angleAxis(glm::radians(175.0f + i), glm::vec3(1, 0, 0))
+                         * glm::angleAxis(glm::radians(static_cast<float>(i)), glm::vec3(0, 0, 1));
+            values0.insert(values0.end(), {qa.x, qa.y, qa.z, qa.w});
+            times0.push_back(i / 30.0f);
+
+            glm::quat qb = glm::angleAxis(glm::radians(185.0f - i), glm::vec3(1, 0, 0))
+                         * glm::angleAxis(glm::radians(static_cast<float>(i)), glm::vec3(0, 0, 1));
+            values1.insert(values1.end(), {qb.x, qb.y, qb.z, qb.w});
+            times1.push_back(i / 30.0f);
+        }
+        AnimationChannel ch0;
+        ch0.node = 0; ch0.animation = 0; ch0.property = Property::Rotation;
+        ch0.times = times0; ch0.values = values0;
+        AnimationChannel ch1;
+        ch1.node = 0; ch1.animation = 1; ch1.property = Property::Rotation;
+        ch1.times = times1; ch1.values = values1;
+        std::vector<AnimationChannel> chans{ch0, ch1};
+        std::vector<Animation> anims{Animation{"a"}, Animation{"b"}};
+
+        auto out = analyze(chans, anims, rig.skeleton());
+        ASSERT_EQ(out.size(), 1u);
+        ASSERT_EQ(out[0].dof_count, 2);
+        assert_no_invalid_stage(out);
+    }
+
+    // 3-DOF winner: general 3-axis motion (no unused slots at all -- included
+    // so the test also documents that the full-rank path is unaffected).
+    {
+        Rig rig;
+        std::vector<float> times, values;
+        for (int i = 0; i <= 40; ++i) {
+            const float f = static_cast<float>(i);
+            glm::quat q = glm::angleAxis(glm::radians(f * 1.5f), glm::vec3(1, 0, 0))
+                        * glm::angleAxis(glm::radians(f * 2.0f), glm::vec3(0, 1, 0))
+                        * glm::angleAxis(glm::radians(f * 1.1f), glm::vec3(0, 0, 1));
+            values.insert(values.end(), {q.x, q.y, q.z, q.w});
+            times.push_back(f / 30.0f);
+        }
+        AnimationChannel ch;
+        ch.node = 0; ch.animation = 0; ch.property = Property::Rotation;
+        ch.times = times; ch.values = values;
+        std::vector<AnimationChannel> chans{ch};
+        std::vector<Animation> anims{Animation{"general"}};
+
+        auto out = analyze(chans, anims, rig.skeleton());
+        ASSERT_EQ(out.size(), 1u);
+        ASSERT_EQ(out[0].dof_count, 3);
+        assert_no_invalid_stage(out);
+    }
+}

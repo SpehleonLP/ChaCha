@@ -76,7 +76,15 @@ struct Articulation {
     // ROTATIONAL DOF the solver committed to (0-3) -- NOT stages.size().
     // A joint can have e.g. 6 stages (3 rotation + 3 translation/scale)
     // while dof_count == 3; translation/scale stages don't count here.
-    // Stays 0 for articulations with no rotation stages at all.
+    // Stays 0 whenever `stages` contains no rotation-typed entry -- either
+    // because the joint had no rotation candidate at all, or because its
+    // rotation candidate's stages were all filtered out as below the noise
+    // threshold on every axis (a locked rotation, e.g. a joint that only
+    // translates). dof_count is therefore guaranteed to equal the number of
+    // rotation-typed stages actually present in `stages` whenever it is
+    // nonzero (rotation stages are kept or dropped as a single all-or-
+    // nothing group per joint, see chacha_filter.cpp), never a count that
+    // outnumbers what was emitted.
     uint8_t dof_count{0};
     // Worst-case round-trip residual (radians) for the committed rotation
     // decomposition. Only meaningful when dof_count > 0; stays 0.0 for

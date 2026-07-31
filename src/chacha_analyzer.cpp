@@ -350,6 +350,10 @@ std::vector<Articulation> analyze(
         }
     }
 
+    auto is_rotation_type = [](StageType t) {
+        return t == StageType::xRotate || t == StageType::yRotate || t == StageType::zRotate;
+    };
+
     std::vector<Articulation> result;
     for (auto& [node, raws] : raw_by_node) {
         std::vector<Stage> stages = filter_stages(raws, options);
@@ -359,8 +363,21 @@ std::vector<Articulation> analyze(
         art.node = node;
         art.stages = std::move(stages);
 
+        // dof_count/fit_residual_rad describe the committed rotation
+        // decomposition (chacha_types.h) and must stay 0 whenever that
+        // decomposition's rotation stages did not survive filter_stages --
+        // e.g. a joint whose rotation is locked (below the noise threshold
+        // on every stage) but which still emits translation/scale stages.
+        // filter_stages now keeps a joint's rotation stages as an
+        // all-or-nothing group (see chacha_filter.cpp), so checking for
+        // ANY surviving rotation-typed Stage is exactly the condition that
+        // matches "the rotation candidate's stages were kept."
+        const bool has_rotation_stage = std::any_of(
+            art.stages.begin(), art.stages.end(),
+            [&](const Stage& s) { return is_rotation_type(s.type); });
+
         auto it = candidate_by_node.find(node);
-        if (it != candidate_by_node.end()) {
+        if (it != candidate_by_node.end() && has_rotation_stage) {
             art.dof_count        = static_cast<uint8_t>(it->second.dof);
             art.fit_residual_rad = it->second.summary.max_residual_rad;
         }

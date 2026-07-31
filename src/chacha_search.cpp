@@ -234,9 +234,15 @@ Candidate evaluate_two_dof(int axis0, int axis1, const JointMotion& m, const Opt
 
         for (size_t i = 0; i < n; ++i) {
             float sol[2];
-            // Seeding from the previous frame keeps the solve in the same
-            // branch (solve_two_dof never returns a point worse than its
-            // seed).
+            // Seeding from the previous frame is a heuristic to keep the
+            // solve in the same branch across consecutive frames. This is
+            // NOT a guarantee: solve_two_dof (chacha_reduced.cpp) is plain
+            // Gauss-Newton with no line search and no best-iterate
+            // tracking, so in principle a bad step can leave `sol` with a
+            // higher residual than `seed` had. Warm-seeding is justified
+            // empirically instead -- see chacha_reduced.cpp's cost comment
+            // above solve_two_dof, measured against Task 8's actual
+            // frame-to-frame usage pattern -- not by a correctness proof.
             solve_two_dof(rel[i], axis0, axis1, seed, sol);
             seed[0] = sol[0];
             seed[1] = sol[1];

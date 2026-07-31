@@ -51,7 +51,10 @@ struct Skeleton {
     std::span<const int> parents;
     std::span<const glm::quat> rest_rotations;   // Rest pose per joint; must be sized >= parents.size()
     std::span<const glm::vec3> rest_translations; // Must be sized >= parents.size()
-    std::span<const glm::vec3> rest_scales;       // Empty means "assume all-ones"; the one span allowed to be short
+    std::span<const glm::vec3> rest_scales;       // May be EMPTY (means "assume all-ones" for every node) or sized
+                                                   // >= parents.size() -- but SHORT (non-empty, under that floor) is
+                                                   // fatal: analyze() returns an empty result with NO diagnostic.
+                                                   // Short is the one thing this span may never be.
 };
 ```
 
@@ -73,11 +76,21 @@ struct Stage {
 // All constraints for one joint
 struct Articulation {
     int node;
-    std::string name;                // Human-readable (e.g., "left_elbow")
+    std::string name;                // ALWAYS EMPTY: analyze() never writes this (ChaCha has no node
+                                      // names to draw from). Callers derive a name from their own
+                                      // data (e.g. doc.nodes[node].name) and pass it through
+                                      // ChaCha::sanitize_articulation_name (chacha_naming.h), which
+                                      // is public exactly so consumers can do this and get AGI's
+                                      // whitespace/uniqueness rules for free.
     std::vector<Stage> stages;       // Ordered sequence, NOT a set keyed by type -- see below
     glm::vec3 pointing_vector;       // Model-wide inferred "forward" axis for this rig
-    uint8_t dof_count;               // 0-3: how many rotation axes the solver committed to
-    float fit_residual_rad;          // Worst-case round-trip residual for the committed decomposition
+    uint8_t dof_count;               // ROTATIONAL DOF the solver committed to (0-3), NOT stages.size():
+                                      // e.g. on sophia, 26 articulations have 6 stages (3 rotation +
+                                      // 3 translation/scale) but dof_count == 3. Stays 0 for joints
+                                      // with translation/scale stages only (no rotation solve ran).
+    float fit_residual_rad;          // Worst-case round-trip residual for the committed rotation
+                                      // decomposition. Only meaningful when dof_count > 0; stays 0
+                                      // for translation-only articulations, same as dof_count.
 };
 ```
 
@@ -229,14 +242,17 @@ Alternatives considered and rejected:
   motion of the whole subtree.
 - A trajectory that crosses the singular set of all 12 charts cannot be represented by three
   stages. A redundant fourth stage would be required; this is not implemented.
-- **The reduced-DOF acceptance gate is worst-case over the union of all scanned animations.**
-  On a rig with many clips this means a reduced-DOF articulation can essentially only be
-  produced for joints with near-zero motion, which the noise filter then discards. Measured:
-  on an 88-clip Mixamo rig every one of 40 articulations resolved to full 3-DOF, with the
-  best 1-DOF residual at the left elbow being 0.741 rad against a 0.02 rad gate -- per-frame
-  median on the correct hinge axis was 0.059 rad, so the axis identification is right but the
-  retargeted motion is genuinely non-planar. "Reduced-DOF output" and "many mocap clips" are
-  close to mutually exclusive by construction.
+- **The reduced-DOF acceptance gate is a WORST CASE over every frame of every scanned
+  animation**, not an average or a per-clip check: a single frame of secondary wobble
+  anywhere in the corpus permanently disqualifies a joint from a reduced-DOF result, no
+  matter how clean the rest of that joint's motion is. Measured on the 88-clip Mixamo rig:
+  the left knee's best 1-DOF residual is 0.836 rad and the left elbow's is 0.741 rad, both
+  against a 0.02 rad gate -- roughly 40x over, so all 40 joints on that rig resolve to full
+  3-DOF. The mechanism itself works and is unit-tested (see the honest test-coverage note
+  below), but it does not engage on real multi-clip mocap content: this is the plain
+  characterization, not a claim that reduced-DOF output and mocap are close to mutually
+  exclusive by some inherent property of the domain -- it is this specific worst-case-over-
+  every-frame gate that rules it out in practice.
 - **Velocity and acceleration from an `AGI ` configuration animation reflect the artist's
   authored sweep speed, not a physical limit**, and the configuration path computes
   acceleration per phase rather than across phase boundaries, which yields systematically
@@ -286,16 +302,24 @@ In tonton-example, a bridge header provides:
 - `chacha_fxgltf_bridge.h`: Extracts `AnimationChannel` data from `fx::gltf::Document`
 - `chacha_fxgltf_bridge.cpp`: Writes `Articulation` output back as AGI_articulations extension
 
-The example program:
+The example program (binary name `chacha-example`, see `tonton-example/CMakeLists.txt`):
 ```
-chacha-analyze input.glb [output.glb]
+chacha-example input.glb [output.glb]
 ```
-Return codes:
+Return codes (see `tonton-example/src/chacha_main.cpp`; each of 2 and 4 covers two
+distinct conditions, not one):
 - `0` — Success: AGI articulations generated and written
-- `1` — Already has AGI_articulations (skip, or overwrite with `--force`)
-- `2` — No animations in file (nothing to analyze)
-- `3` — Cannot disentangle motion stages from animations (ambiguous multi-axis motion)
-- `4` — File I/O error
+- `1` — File already has AGI_articulations (skip, or overwrite with `--force`)
+- `2` — Nothing to analyze: either the document has no animations at all, or it has
+  animations but none produced a usable channel (a channel must target rotation,
+  translation, or scale)
+- `3` — Analysis ran but produced no articulations: every observed motion, across
+  every animation and joint, fell below the noise threshold (`--rotation-threshold`
+  / `--translation-threshold`). There is no "ambiguous decomposition" exit path in
+  the current solver -- `select_candidate` (chacha_search.cpp) always picks a best
+  candidate; it never refuses to disambiguate.
+- `4` — I/O or argument failure: reading the input file, parsing command-line
+  arguments, or writing the output file all funnel into this same code
 
 ## Downstream Consumers
 

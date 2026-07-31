@@ -30,6 +30,22 @@ file(GLOB_RECURSE CHACHA_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h" "${CM
 
 add_library(chacha STATIC ${CHACHA_SOURCES} ${CHACHA_HEADERS})
 
+# -Wall -Wextra on the library itself, not just on downstream consumers
+# (tonton-example only turned these on for chacha-example). Catching real
+# defects here is cheaper than catching them at the call site.
+target_compile_options(chacha PRIVATE -Wall -Wextra)
+
+# Off by default: sanitizers weren't wired into either CMake or CI before
+# this option existed, which is how a live out-of-bounds read sat
+# undetected until a reviewer happened to build with ASan by hand. Opt in
+# with -DCHACHA_ENABLE_ASAN=ON for local debugging or a dedicated CI job;
+# leave off for normal builds since it changes ABI/perf characteristics.
+option(CHACHA_ENABLE_ASAN "Build chacha (and its tests) with -fsanitize=address,undefined" OFF)
+if(CHACHA_ENABLE_ASAN)
+    target_compile_options(chacha PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(chacha PUBLIC -fsanitize=address,undefined)
+endif()
+
 target_include_directories(chacha
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

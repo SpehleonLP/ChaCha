@@ -64,10 +64,23 @@ struct Skeleton {
 
 struct Articulation {
     int node{-1};
+    // ALWAYS EMPTY as produced by analyze() -- ChaCha has no node names to
+    // draw from. Callers derive a name from their own data (e.g. a glTF
+    // node name) and run it through ChaCha::sanitize_articulation_name
+    // (chacha_naming.h), which exists for exactly this purpose: it enforces
+    // AGI's whitespace/uniqueness rules on a caller-supplied name. Nothing
+    // in src/ writes this field.
     std::string name;
     std::vector<Stage> stages;
     glm::vec3 pointing_vector{0.0f, 1.0f, 0.0f};
+    // ROTATIONAL DOF the solver committed to (0-3) -- NOT stages.size().
+    // A joint can have e.g. 6 stages (3 rotation + 3 translation/scale)
+    // while dof_count == 3; translation/scale stages don't count here.
+    // Stays 0 for articulations with no rotation stages at all.
     uint8_t dof_count{0};
+    // Worst-case round-trip residual (radians) for the committed rotation
+    // decomposition. Only meaningful when dof_count > 0; stays 0.0 for
+    // translation/scale-only articulations, same as dof_count.
     float   fit_residual_rad{0.0f};
 };
 

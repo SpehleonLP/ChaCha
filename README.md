@@ -20,9 +20,19 @@ auto articulations = ChaCha::analyze(channels, animations, skeleton);
 // Each articulation describes one joint's constraints. `stages` is an ORDERED
 // SEQUENCE -- a StageType can legitimately repeat (proper-Euler charts), so
 // never key or deduplicate stages by type.
+//
+// NOTE: `art.name` is always empty here -- analyze() never populates it,
+// because ChaCha has no node names to draw from (it never reads a skeleton's
+// naming, only its hierarchy/rest poses). Callers derive a name themselves
+// (e.g. from their own skeleton/node table) and sanitize it for AGI with
+// `ChaCha::sanitize_articulation_name` (chacha_naming.h), which also
+// deduplicates names colliding across joints in the same model.
+std::vector<std::string> taken_names;
 for (const auto& art : articulations) {
+    std::string name = ChaCha::sanitize_articulation_name(
+        my_node_name_lookup(art.node), taken_names);
     printf("Joint %d (%s): %zu DOFs\n",
-           art.node, art.name.c_str(), art.stages.size());
+           art.node, name.c_str(), art.stages.size());
     for (const auto& stage : art.stages) {
         printf("  %s: [%.2f, %.2f] max_vel=%.2f\n",
                ChaCha::stage_type_name(stage.type),

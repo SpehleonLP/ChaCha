@@ -70,8 +70,13 @@ struct Trajectory {
 
 // Signed difference (current - previous) wrapped into [-pi, pi]. At exactly
 // d == pi (mod 2pi) this returns -pi rather than +pi, an artifact of round()
-// rounding halves away from zero; the two are equivalent modulo 2pi and this
-// is harmless here since callers only ever use the value squared.
+// rounding halves away from zero. This tie-break is NOT harmless: the value
+// is used UNSQUARED to accumulate unwrapped angle trajectories (chacha_dp.cpp,
+// chacha_search.cpp, chacha_config.cpp), where at an exact +-pi step this
+// sign choice directly determines which way the running total moves, and
+// therefore the sign of the reported range for that step. Callers relying on
+// this function for trajectory accumulation must be aware the +-pi case is
+// resolved toward -pi, not that it is squared away.
 float principal_difference(float current, float previous);
 
 // Resolves, per frame, which of solve_euler's two branches minimizes the

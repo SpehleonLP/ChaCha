@@ -243,16 +243,31 @@ Alternatives considered and rejected:
 - A trajectory that crosses the singular set of all 12 charts cannot be represented by three
   stages. A redundant fourth stage would be required; this is not implemented.
 - **The reduced-DOF acceptance gate is a WORST CASE over every frame of every scanned
-  animation**, not an average or a per-clip check: a single frame of secondary wobble
-  anywhere in the corpus permanently disqualifies a joint from a reduced-DOF result, no
-  matter how clean the rest of that joint's motion is. Measured on the 88-clip Mixamo rig:
-  the left knee's best 1-DOF residual is 0.836 rad and the left elbow's is 0.741 rad, both
-  against a 0.02 rad gate -- roughly 40x over, so all 40 joints on that rig resolve to full
-  3-DOF. The mechanism itself works and is unit-tested (see the honest test-coverage note
-  below), but it does not engage on real multi-clip mocap content: this is the plain
-  characterization, not a claim that reduced-DOF output and mocap are close to mutually
-  exclusive by some inherent property of the domain -- it is this specific worst-case-over-
-  every-frame gate that rules it out in practice.
+  animation**, not an average or a per-clip check: a single frame that doesn't fit the
+  candidate axis disqualifies it, no matter how clean the rest of that joint's motion is.
+  On the 88-clip Mixamo rig, every one of sophia's 40 joints resolves to full 3-DOF
+  (`0/0/0/40` histogram); the left knee's best 1-DOF residual is 0.836 rad and the left
+  elbow's is 0.741 rad, both against a 0.02 rad gate. This is NOT the gate being too
+  strict -- it is the correct answer for this corpus. Mixamo's hip does not actually
+  twist, so retargeting pushes that rotation onto downstream joints: the knee genuinely
+  moves through three independent axes in this data, behaving like a ball-and-socket
+  rather than the anatomical hinge it is at rest. Reporting it as 3-DOF is accurate;
+  classifying it as a 1-DOF hinge would be false, because ChaCha's contract is *observed*
+  range of motion (see the first Limitations bullet above), not the joint's anatomically
+  possible range. Loosening the gate to a percentile or RMS criterion instead of a
+  worst-case would produce a tidier-looking 1-DOF classification here, but only by
+  discarding motion the joint actually undergoes in the corpus -- do not do this. The
+  worst-case-over-every-frame criterion is what makes the emitted range/stage bounds a
+  true superset of all observed motion; an independent coverage check across all three
+  corpus models (sophia, scorpion, treefrog) confirmed 0 samples fall outside their
+  emitted bounds out of 116,803 checked, and a percentile/RMS gate would break that
+  property in exchange for a more legible DOF count. The reduced-DOF path itself is not
+  dead: it fires on real models through the configuration fast path (scorpion emits 11
+  one-DOF and 16 two-DOF articulations; treefrog 41 and 7) and is covered end-to-end by
+  synthetic unit tests. It simply does not fire via the general search path
+  (`select_candidate`'s residual gate) on multi-clip retargeted mocap in this corpus,
+  for the anatomically sound reason above -- see the test-coverage note below for what
+  that does and doesn't mean for confidence in the gate itself.
 - **Velocity and acceleration from an `AGI ` configuration animation reflect the artist's
   authored sweep speed, not a physical limit**, and the configuration path computes
   acceleration per phase rather than across phase boundaries, which yields systematically

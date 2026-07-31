@@ -2,21 +2,24 @@
 
 Joint articulation constraint analysis from skeletal animation data.
 
-ChaCha analyzes animation keyframes to deduce per-joint constraint descriptors: range of motion, velocity limits, and effort limits for each degree of freedom. Output follows the [AGI_articulations](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/AGI_articulations) glTF extension schema.
+ChaCha analyzes animation keyframes to deduce per-joint constraint descriptors: range of motion, observed velocity, and observed peak acceleration for each degree of freedom. Output follows the [AGI_articulations](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/AGI_articulations) glTF extension schema.
 
 ## Usage
 
 ```cpp
 #include <chacha.h>
 
-// Prepare input: animation channels + skeleton hierarchy
-std::vector<ChaCha::AnimationChannel> channels = /* extract from your data */;
+// Prepare input: animation channels, animation names, and skeleton hierarchy
+std::vector<ChaCha::AnimationChannel> channels   = /* extract from your data */;
+std::vector<ChaCha::Animation>        animations = /* one entry per animation clip */;
 ChaCha::Skeleton skeleton = /* parents array + rest poses */;
 
-// Analyze
-auto articulations = ChaCha::analyze(channels, skeleton);
+// Analyze (options, scan, and diagnostics are optional)
+auto articulations = ChaCha::analyze(channels, animations, skeleton);
 
-// Each articulation describes one joint's constraints
+// Each articulation describes one joint's constraints. `stages` is an ORDERED
+// SEQUENCE -- a StageType can legitimately repeat (proper-Euler charts), so
+// never key or deduplicate stages by type.
 for (const auto& art : articulations) {
     printf("Joint %d (%s): %zu DOFs\n",
            art.node, art.name.c_str(), art.stages.size());
@@ -30,20 +33,31 @@ for (const auto& art : articulations) {
 
 ## How It Works
 
-1. Convert keyframes to rest-pose-relative values
-2. Compute per-keyframe velocity derivatives
-3. Decompose rotations via swing-twist into independent DOFs (xRotate, yRotate, zRotate)
-4. Segment and merge motion ranges across all animations per joint
-5. Filter out noise below configurable thresholds
-6. Produce one `Articulation` per joint with significant motion
+1. Convert keyframes to rest-pose-relative values (rotation: subtract rest quaternion;
+   translation/scale: subtract/divide by rest translation/scale).
+2. Decompose rotation per joint: if the scan narrowed to an artist-authored "AGI "
+   configuration animation with clean one-axis-at-a-time motion, use its phase order
+   directly; otherwise search every 1-axis, 2-axis, and 3-axis (12 Euler chart) decomposition
+   and keep the best fit under a residual gate.
+3. Combine multiple animations of the same joint by anchoring each against a common
+   reference before unioning ranges, so trajectories that straddle a +-pi wrap don't
+   collapse to a spurious ~2pi span.
+4. Compute velocity and acceleration by resampling onto a uniform time grid.
+5. Filter out stages below configurable thresholds.
+6. Infer a model-wide pointing vector and produce one `Articulation` per joint with
+   significant motion.
 
 ## Configuration
 
 ```cpp
 ChaCha::Options options;
-options.rotation_threshold_rad = 0.01f;   // Min rotation range to keep (radians)
-options.translation_threshold_m = 0.001f; // Min translation range to keep (meters)
-options.scale_threshold = 0.01f;          // Min scale range to keep
+options.rotation_threshold_rad = 0.01f;    // Min rotation range to keep (radians)
+options.translation_threshold_m = 0.001f;  // Min translation range to keep (meters)
+options.scale_threshold = 0.01f;           // Min scale range to keep
+options.prioritize_rom_animations = true;  // Auto-narrow scan to "AGI "-prefixed animations
+options.resample_rate_hz = 60.0f;          // Uniform grid used for velocity/acceleration
+options.derivative_window = 5;             // Smoothing window for derivative estimates
+options.max_fit_residual_rad = 0.02f;      // Acceptance gate for reduced (1-/2-axis) candidates
 ```
 
 ## Building

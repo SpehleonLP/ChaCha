@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-ChaCha is a standalone library that deduces joint articulation constraints from skeletal animation data. Given a set of animation channels (rotation/translation/scale keyframes per joint), it produces per-joint constraint descriptors: ranges of motion, velocity limits, and effort limits for each degree of freedom.
+ChaCha is a standalone library that deduces joint articulation constraints from skeletal animation data. Given a set of animation channels (rotation/translation/scale keyframes per joint), it produces per-joint constraint descriptors: ranges of motion, observed velocity, and observed peak acceleration for each degree of freedom. (Effort/torque limits are out of scope -- see Limitations.)
 
 The output format follows the [AGI_articulations](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/AGI_articulations) glTF extension schema, but the library itself has **no dependency on any glTF parser**. It operates on pre-extracted animation data and produces structured constraint data. Bridge code to read/write glTF files lives in the consuming application (e.g., tonton-example), not in ChaCha.
 
@@ -25,20 +25,33 @@ ChaCha makes this implicit information explicit by analyzing animation keyframes
 ### Input (provided by caller)
 
 ```cpp
+// One animation clip, referenced by AnimationChannel::animation. `name` is a
+// non-owning view: the caller must keep the backing storage alive for the
+// duration of the analyze() call (and beyond, if the caller inspects it
+// afterward) -- a bridge layer that builds names from a temporary (e.g. a
+// glTF JSON string that goes out of scope) creates a use-after-free that
+// nothing in this library can detect. Used to auto-detect "AGI "-prefixed
+// configuration animations.
+struct Animation {
+    std::string_view name;
+};
+
 // Per animation channel: one joint, one property, one set of keyframes
 struct AnimationChannel {
     int node;                    // Joint/node index in skeleton
+    int animation;                // Index into the analyze() animations span
     Property property;           // Translation, Rotation, Scale
     InterpolationType interp;    // Linear, Step, CubicSpline
     std::span<const float> times;       // Keyframe timestamps (seconds)
     std::span<const float> values;      // Keyframe values (3 or 4 floats per key)
 };
 
-// Skeleton hierarchy (just parents array + rest poses)
+// Skeleton hierarchy (parents array + rest poses)
 struct Skeleton {
     std::span<const int> parents;
-    std::span<const glm::quat> rest_rotations;   // Rest pose per joint
-    std::span<const glm::vec3> rest_translations;
+    std::span<const glm::quat> rest_rotations;   // Rest pose per joint; must be sized >= parents.size()
+    std::span<const glm::vec3> rest_translations; // Must be sized >= parents.size()
+    std::span<const glm::vec3> rest_scales;       // Empty means "assume all-ones"; the one span allowed to be short
 };
 ```
 
@@ -47,57 +60,108 @@ struct Skeleton {
 ```cpp
 // Per degree of freedom for a joint
 struct Stage {
-    StageType type;         // xRotate, yRotate, zRotate, xTranslate, ...
-    float min_value;        // Lower bound (radians or meters)
-    float max_value;        // Upper bound
-    float initial_value;    // Rest/neutral value (usually 0)
-    float max_velocity;     // Speed limit (rad/s or m/s)
-    float max_effort;       // Force/torque limit (optional, mass-dependent)
+    StageType type;          // xRotate, yRotate, zRotate, xTranslate, ..., xScale, ...
+    float min_value;         // Lower bound (radians, meters, or a bare multiplicative ratio for scale)
+    float max_value;         // Upper bound
+    float initial_value;     // Rest/neutral value (0 for rotation/translation, 1 for scale)
+    float max_velocity;      // Observed speed (rad/s, m/s, or ratio/s)
+    float max_acceleration;  // Observed peak acceleration. Was `max_effort`: force/torque requires
+                              // mass and inertia this library cannot derive from keyframes alone,
+                              // so that field was replaced with what keyframes actually support.
 };
 
 // All constraints for one joint
 struct Articulation {
     int node;
-    std::string name;           // Human-readable (e.g., "left_elbow")
-    std::vector<Stage> stages;  // One per degree of freedom
+    std::string name;                // Human-readable (e.g., "left_elbow")
+    std::vector<Stage> stages;       // Ordered sequence, NOT a set keyed by type -- see below
+    glm::vec3 pointing_vector;       // Model-wide inferred "forward" axis for this rig
+    uint8_t dof_count;               // 0-3: how many rotation axes the solver committed to
+    float fit_residual_rad;          // Worst-case round-trip residual for the committed decomposition
 };
 ```
+
+**Stages are an ordered sequence, not a set.** A `StageType` can legitimately repeat within one
+articulation's `stages` (see "General multi-axis rotation" below) -- consumers must iterate in
+order and disambiguate repeats by occurrence index, e.g. via `stage_name_for(type, occurrence)`
+in `chacha_naming.h`, never by keying or deduplicating on `StageType` alone.
 
 ### Processing Pipeline
 
 ```
 Animation Channels (per joint)
   │
-  ├─ 1. Convert keyframes to rest-pose-relative values
-  │     (subtract rest rotation/translation so constraints are relative to bind pose)
+  ├─ 1. Resolve the scan
+  │     `scan` empty means "all animations". If options.prioritize_rom_animations
+  │     is set and any animation's name begins with "AGI " (case-insensitive),
+  │     the scan narrows to just those -- an artist-authored configuration
+  │     animation is treated as a direct specification. (chacha_analyzer.cpp,
+  │     resolve_scan)
   │
-  ├─ 2. Compute per-keyframe derivatives
-  │     (velocity = Δvalue / Δtime between consecutive keyframes)
+  ├─ 2. Convert keyframes to rest-pose-relative values
+  │     Rotation: subtract rest rotation (quaternion). Translation/scale:
+  │     subtract/divide by rest translation/scale. Scale is a MULTIPLICATIVE
+  │     ratio (rest 1.0 -> 2.0 is [1, 2], never [0, 1]), never an additive delta.
   │
-  ├─ 3. Segment into motion stages
-  │     A "stage" is a continuous motion away from and back to the rest pose.
-  │     Track when the joint deviates from rest (start) and returns (end).
-  │     Multiple stages may exist for the same DOF (e.g., flex then extend).
+  ├─ 3. Per joint, per DOF-family: solve for the best decomposition
+  │     Translation and scale project directly onto the three rest-relative
+  │     axes (chacha_summary.cpp's `summarise`).
   │
-  ├─ 4. Decompose multi-axis motion into single-axis DOFs
-  │     For rotations: use swing-twist decomposition to separate
-  │     cone-of-motion (swing) from axial rotation (twist).
-  │     For translations: project onto bone-local axes.
-  │     Key challenge: quaternion keyframes that rotate around multiple
-  │     axes simultaneously need to be decomposed into independent DOFs.
+  │     Rotation is harder: a joint's rest-relative quaternion trajectory may
+  │     be driven by one axis, two axes, or genuinely three. Two paths:
   │
-  ├─ 5. Merge compatible stages
-  │     Stages of the same type (e.g., both yRotate) with similar
-  │     directions get merged. Take union of min/max ranges,
-  │     maximum of velocity/effort limits.
+  │     a) Configuration fast path (chacha_config.cpp): if the scan narrowed to
+  │        "AGI " animations AND the motion has configuration shape (exercises
+  │        one axis at a time, returning to rest between phases), the phase
+  │        order IS the answer -- no search needed, since the axes commute and
+  │        a search has no way to recover authored order from commuting axes.
   │
-  ├─ 6. Filter noise
-  │     Discard stages with negligible motion (< threshold).
-  │     Default thresholds: 0.01 rad for rotation, 0.001m for translation.
+  │     b) General search (chacha_search.cpp, select_candidate): otherwise,
+  │        evaluate every 1-axis (3), 2-axis (6, ordered pairs), and 3-axis
+  │        (12 Euler charts -- 6 Tait-Bryan + 6 proper-Euler; chacha_charts.cpp)
+  │        decomposition and pick the best by dof (fewest wins, subject to a
+  │        residual acceptance gate for 1-/2-axis candidates -- chacha_reduced.cpp),
+  │        then tightest total range, then best conditioning. The 3-axis charts
+  │        always reconstruct exactly (Euler decomposition is always exact,
+  │        chacha_charts.cpp's `solve_euler`); 1-/2-axis candidates are
+  │        least-squares fits admitted only if they explain every observed pose
+  │        within `options.max_fit_residual_rad`.
+  │
+  │     Per-frame branch ambiguity in the 3-axis charts (each Euler solve has
+  │     two solution branches) is resolved by a Viterbi/DP shortest path over
+  │     consecutive frames (chacha_dp.cpp, `resolve_branches`), then a global
+  │     tie-break toward whichever branch stays closer to rest.
+  │
+  │     Multiple animations of the same joint are combined by anchoring each
+  │     one's trajectory against a common per-axis reference before taking the
+  │     union of ranges -- otherwise two animations straddling a +-pi wrap
+  │     boundary from opposite sides union to a spurious ~2pi span
+  │     (`anchor_trajectory`). The final range is then shifted by whichever
+  │     multiple of 2pi brings its midpoint nearest zero, so the reported
+  │     absolute values don't depend on which animation was processed first.
+  │
+  ├─ 4. Compute velocity and acceleration
+  │     Resampled onto a uniform time grid (options.resample_rate_hz) before
+  │     differentiating, so estimates don't depend on keyframe density
+  │     (chacha_summary.cpp). Values reported are OBSERVED, not physical
+  │     limits -- see Limitations, especially for the configuration path.
+  │
+  ├─ 5. Filter noise
+  │     Discard stages with negligible range (< threshold). Default
+  │     thresholds: 0.01 rad for rotation, 0.001 m for translation, 0.01 for
+  │     scale (chacha_filter.cpp).
+  │
+  ├─ 6. Infer a model-wide pointing vector
+  │     A single "forward" axis vote shared across all articulations in the
+  │     result, not a per-joint value (chacha_pointing.cpp), with a per-joint
+  │     fallback when no axis clears the dominant-axis fraction.
   │
   └─ 7. Produce Articulation per joint
-        Collect all surviving stages into a single Articulation struct.
-        Joints with no significant motion get no articulation (locked).
+        Stage order is a fixed, deliberate contract: translate, then scale,
+        then rotate, regardless of the order channels arrived in. Joints with
+        no significant motion in the scanned animations get no articulation
+        (locked). A StageType can legitimately repeat (proper-Euler charts
+        emit the same axis twice) -- see the Output section above.
 ```
 
 ### Animation Cleaning (Optional)
@@ -117,25 +181,88 @@ See `include/chacha_clean.h` for the `CleanOptions` and `CleanedChannel` types.
 
 ## Design Decisions
 
-### Multi-axis rotation decomposition (Step 4)
+### General multi-axis rotation decomposition (Step 3)
 
-**Chosen approach: Swing-twist decomposition.** Each rest-relative quaternion is decomposed into:
-- **Twist**: axial rotation around bone's local Y axis → `yRotate` stage
-- **Swing**: cone-of-motion perpendicular to Y → `xRotate` + `zRotate` stages
+**Chosen approach: exhaustive 1/2/3-axis candidate search, not swing-twist.** An earlier
+design used swing-twist decomposition (twist around bone-local Y, swing on X/Z). It was
+replaced because swing-twist's axis assignment is fixed by convention rather than by
+evidence: it cannot recognise when a joint's real motion is actually 1-axis or 2-axis (it
+always reports a swing pair even for a pure hinge), and it has no way to decide *which* axis
+order is correct for a genuinely 3-axis joint. The current approach (`chacha_search.cpp`,
+`select_candidate`) instead evaluates every plausible decomposition -- 3 single-axis fits, 6
+ordered two-axis fits, and all 12 three-axis Euler charts (6 Tait-Bryan + 6 proper-Euler,
+`chacha_charts.cpp`) -- against the observed keyframes and picks the one that actually fits
+best, honouring a strict residual gate for the reduced (1-/2-axis) candidates so a fit is only
+accepted when it genuinely explains the motion, not just approximates it.
 
-This maps naturally to anatomical joints (elbow = pure swing, forearm = pure twist, shoulder = swing + twist). Implementation is in `src/chacha_decompose.cpp`.
+The 12 charts cover every triple of rotation axes (both distinct-axis Tait-Bryan sequences
+and repeated-axis proper-Euler sequences like Z-X-Z). Each chart's Euler solve
+(`solve_euler`) is exact and closed-form (Bernardes & Viollet, PLoS ONE 2022, generalised to
+all 12 sequences); the two solution branches at each frame are disambiguated by a Viterbi/DP
+shortest path across frames (`chacha_dp.cpp`) rather than chosen independently per frame,
+since an independent per-frame choice can flip branches mid-motion and fabricate a
+discontinuous trajectory.
+
+**A separate fast path exists for artist-authored specifications** (`chacha_config.cpp`):
+when the scan has narrowed to "AGI "-prefixed animations and the motion visibly exercises
+one axis at a time between returns to rest, the phase order recovered directly from that
+shape is used as-is, bypassing the search. This is necessary, not just an optimisation: axes
+exercised one at a time compose commutatively, so no amount of searching can recover the
+artist's intended stage *order* from the resulting quaternion alone -- only the shape of the
+motion (one axis at a time) can.
 
 Alternatives considered and rejected:
-- Euler decomposition: suffers from gimbal lock on multi-axis joints
-- PCA on rotation vectors: axes don't align with intuitive anatomical directions
-
-### Stage segmentation (Step 3)
-
-Multiple animations contributing to the same joint are merged by taking the union of observed ranges and the maximum of observed velocities. This correctly handles oscillating animations (walking cycles) by capturing the full swing range rather than treating each direction as a separate stage.
+- Swing-twist decomposition: see above -- fixed axis assignment, no way to detect or prefer
+  a reduced-DOF fit, no way to determine multi-axis stage order.
+- PCA on rotation vectors: axes don't align with intuitive anatomical directions, and still
+  provides no mechanism for recovering stage order on commuting axes.
 
 ### Limitations
 
-ChaCha reports *observed* ROM, not *possible* ROM. If no animation fully extends a joint, the range will be underestimated. Callers can add safety margins or provide a dedicated ROM animation.
+- ChaCha reports *observed* ROM, not *possible* ROM. If no animation fully extends a joint,
+  the range is underestimated. Callers can add safety margins or provide a dedicated ROM
+  animation.
+- When the scan narrows to `AGI ` configuration animations, velocity and acceleration reflect
+  the sweep speed the artist authored, which is usually a uniform ramp rather than a real
+  speed limit. Ranges and stage order are the trustworthy outputs in that mode.
+- Effort and torque limits are out of scope: they require mass and inertia and depend on the
+  motion of the whole subtree.
+- A trajectory that crosses the singular set of all 12 charts cannot be represented by three
+  stages. A redundant fourth stage would be required; this is not implemented.
+- **The reduced-DOF acceptance gate is worst-case over the union of all scanned animations.**
+  On a rig with many clips this means a reduced-DOF articulation can essentially only be
+  produced for joints with near-zero motion, which the noise filter then discards. Measured:
+  on an 88-clip Mixamo rig every one of 40 articulations resolved to full 3-DOF, with the
+  best 1-DOF residual at the left elbow being 0.741 rad against a 0.02 rad gate -- per-frame
+  median on the correct hinge axis was 0.059 rad, so the axis identification is right but the
+  retargeted motion is genuinely non-planar. "Reduced-DOF output" and "many mocap clips" are
+  close to mutually exclusive by construction.
+- **Velocity and acceleration from an `AGI ` configuration animation reflect the artist's
+  authored sweep speed, not a physical limit**, and the configuration path computes
+  acceleration per phase rather than across phase boundaries, which yields systematically
+  smaller values than the search path for the same input (measured: a 3-phase sinusoid gives
+  3.61 rad/s² via the configuration path versus ~13.05 rad/s² via the search path for the
+  same input). Ranges and stage order are the trustworthy outputs in that mode.
+- **A stage type can legitimately repeat within one articulation.** Six of the twelve
+  rotation charts are proper-Euler with a repeated axis, so roughly 31% of general-motion
+  three-DOF joints emit e.g. `zRotate` in both the first and third stage. Stages are an
+  ordered sequence applied in order of appearance; consumers must never key or deduplicate
+  them by type, and must disambiguate repeats by occurrence index via `stage_name_for`.
+
+**Test coverage is honest, not flattering, about the search path.** `select_candidate`'s
+reduced-DOF search and residual acceptance gate have no real-data integration coverage in
+this repository's own corpus of glTF models: running the whole integration test suite
+against a build where that gate can never accept a reduced candidate still passes every
+test. It IS covered by this library's own synthetic unit tests -- the same ablation fails
+several of those -- and that is the appropriate place for it, but no available real-world
+model happens to exercise it end-to-end. Likewise, no corpus model produces a scale stage or
+a repeated stage type; those paths are covered synthetically only.
+
+`Animation::name` is a `std::string_view`: the caller owns the backing storage and must keep
+it alive for the duration of the `analyze()` call (and beyond, if it inspects the name
+afterward). Both the glTF read bridge and the write bridge in a consuming application must
+get this right -- a bridge that builds a name from a temporary creates a use-after-free that
+nothing in this library can detect.
 
 ## Dependencies
 
@@ -198,12 +325,24 @@ chacha/
 │   ├── chacha.h              // Public API: analyze() function
 │   ├── chacha_types.h        // Input/output data structures
 │   ├── chacha_stage.h        // StageType enum and Stage struct
+│   ├── chacha_naming.h       // sanitize_articulation_name / stage_name_for for AGI output
 │   └── chacha_clean.h        // Public API: clean() for keyframe reduction
 └── src/
-    ├── chacha_internal.h     // Internal types: DofTrack, RawStage, pipeline decls
-    ├── chacha_analyzer.cpp   // Main analysis pipeline (steps 1-7)
-    ├── chacha_decompose.cpp  // Swing-twist decomposition (step 4)
-    ├── chacha_segment.cpp    // Stage segmentation and merging (steps 3, 5)
-    ├── chacha_filter.cpp     // Noise filtering and thresholds (step 6)
+    ├── chacha_internal.h     // Internal types: Chart, Candidate, JointMotion, pipeline decls
+    ├── chacha_analyzer.cpp   // Main analysis pipeline: scan resolution, rest-relative
+    │                         // conversion, dispatch to config/search paths, stage assembly
+    ├── chacha_charts.cpp     // The 12 Euler charts: build_charts, solve_euler, compose_chart,
+    │                         // alternate_branch, chart_conditioning
+    ├── chacha_search.cpp     // select_candidate: the general 1/2/3-axis candidate search
+    ├── chacha_reduced.cpp    // Closed-form 1-axis solve and Gauss-Newton 2-axis solve,
+    │                         // plus their residual metrics
+    ├── chacha_dp.cpp         // Viterbi/DP branch resolution and cross-animation anchoring
+    ├── chacha_config.cpp     // Configuration-animation fast path: is_configuration_motion,
+    │                         // solve_configuration
+    ├── chacha_summary.cpp    // Trajectory -> CandidateSummary: resampling, velocity/
+    │                         // acceleration, range union
+    ├── chacha_filter.cpp     // Noise filtering and thresholds
+    ├── chacha_pointing.cpp   // Model-wide pointing-vector inference (infer_pointing_vectors)
+    ├── chacha_naming.cpp     // AGI-compliant name sanitisation and stage naming
     └── chacha_clean.cpp      // Redundant keyframe removal and interpolation promotion
 ```

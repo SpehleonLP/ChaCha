@@ -105,6 +105,12 @@ struct Options {
     // Full-rank (3-DOF) chart candidates always reconstruct exactly and are
     // not subject to this gate.
     float max_fit_residual_rad{0.02f};
+    // A three-axis chart is eligible only if its middle stage's observed range
+    // stays this far from the chart's gimbal lock (0 mod pi for proper Euler,
+    // pi/2 mod pi for Tait-Bryan). Near the lock the outer two angles trade
+    // against each other, so the decomposition swings on float noise: the
+    // chart that wins there is a different answer at every rounding.
+    float min_singular_clearance_rad{0.1f};
 };
 
 // One noteworthy event encountered while analyzing a joint's animation
@@ -120,6 +126,9 @@ struct Diagnostic {
         DegenerateRestScale,   // a scale channel's rest scale was too near zero
                                // to divide by; raw values were reported instead
                                // of a ratio for the affected axis
+        NoClearChart,          // every three-axis chart's middle stage came within
+                               // min_singular_clearance_rad of gimbal lock; the
+                               // chart clearing it most was used
     } kind{EmptyChannel};
 };
 

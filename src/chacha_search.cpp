@@ -293,6 +293,18 @@ bool better(const Candidate& lhs, const Candidate& rhs)
 
 } // namespace
 
+double singular_clearance(const Candidate& c)
+{
+    // In double: the clearance is compared against a margin, and a range end that
+    // sits within float rounding of a singular angle must not round across it.
+    const double pi     = 3.14159265358979323846;
+    const double offset = c.proper ? 0.0 : 0.5 * pi;
+    const double lo = c.summary.min_value[1], hi = c.summary.max_value[1];
+    const double above = offset + std::ceil((lo - offset) / pi) * pi;   // the first singular angle >= lo
+    if (above <= hi) return 0.0;
+    return std::min(lo - (above - pi), above - hi);
+}
+
 Candidate select_candidate(const JointMotion& motion, const Options& options)
 {
     Candidate best;
@@ -315,9 +327,27 @@ Candidate select_candidate(const JointMotion& motion, const Options& options)
                 best = c;
         }
 
+    // Ranking by range alone favours a chart whose middle stage sweeps through its
+    // gimbal lock: there the outer angles cancel, so the summed range shrinks while
+    // the decomposition itself becomes arbitrary. Such a chart is used only when
+    // every chart is in that state, and then the one furthest from it.
+    Candidate fallback;
+    double    fallback_clearance = -1.0;
     for (const auto& chart : all_charts()) {
         Candidate c = evaluate_chart(chart, motion, options);
-        if (c.summary.valid && better(c, best)) best = c;
+        if (!c.summary.valid) continue;
+        const double clearance = singular_clearance(c);
+        if (clearance >= double(options.min_singular_clearance_rad)) {
+            if (better(c, best)) best = c;
+        } else if (clearance > fallback_clearance
+                   || (clearance == fallback_clearance && better(c, fallback))) {
+            fallback           = c;
+            fallback_clearance = clearance;
+        }
+    }
+    if (!best.summary.valid && fallback.summary.valid) {
+        fallback.uncleared = true;
+        best = fallback;
     }
 
     return best;

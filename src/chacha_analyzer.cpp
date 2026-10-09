@@ -329,6 +329,7 @@ std::vector<Articulation> analyze(
                     ? solve_configuration(motion, options)
                     : select_candidate(motion, options);
         if (!c.summary.valid) continue;
+        if (c.uncleared) note(node, -1, Diagnostic::NoClearChart);
         candidate_by_node[node] = c;
         // Stages are an ORDERED SEQUENCE, not a set keyed by StageType: for
         // proper-Euler charts stage[0] == stage[2] by construction (the same

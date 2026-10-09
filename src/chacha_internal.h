@@ -210,6 +210,7 @@ struct Candidate {
     int              axis[3]{-1, -1, -1};
     int              dof{0};
     bool             proper{false};
+    bool             uncleared{false};   // a chart chosen with no chart clearing its gimbal lock
     CandidateSummary summary;
 };
 
@@ -217,8 +218,16 @@ struct Candidate {
 // 6 ordered two-axis, 12 three-axis charts), solves and summarises each
 // against every animation in `motion`, and returns the best by a
 // lexicographic score: fewest DOF first (subject to a fit-residual gate),
-// then smallest summed range, then best worst-case conditioning.
+// then smallest summed range, then best worst-case conditioning. A chart
+// enters that ranking only if its middle stage clears gimbal lock by
+// Options::min_singular_clearance_rad; when none does (and no reduced
+// candidate is admissible), the chart clearing it most is returned, marked
+// `uncleared`.
 Candidate select_candidate(const JointMotion& motion, const Options& options);
+
+// The distance from a chart candidate's middle-stage range to the nearest
+// angle where the chart is singular; 0 when the range reaches one.
+double singular_clearance(const Candidate& c);
 
 // An artist-authored configuration animation exercises one axis at a time,
 // returning to rest between phases, in the order the stages should apply.
